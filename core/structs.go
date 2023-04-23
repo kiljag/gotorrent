@@ -1,5 +1,29 @@
 package core
 
+import "net"
+
+const (
+	MESSAGE_CHOKE          = 0x00
+	MESSAGE_UNCHOKE        = 0x01
+	MESSAGE_INTERESTED     = 0x02
+	MESSAGE_NOT_INTERESTED = 0x03
+	MESSAGE_HAVE           = 0x04
+	MESSAGE_BITFIELD       = 0x05
+	MESSAGE_REQUEST        = 0x06
+	MESSAGE_PIECE_BLOCK    = 0x07
+	MESSAGE_CANCEL         = 0x08
+	MESSAGE_PORT           = 0x09
+
+	// custom types
+	MESSAGE_KEEPALIVE         = 0x10
+	MESSAGE_PEER_DISCONNECTED = 0x20
+	MESSAGE_PIECE_COMPLETED   = 0x30
+	MESSAGE_PIECE_CANCELLED   = 0x40
+
+	// piece queue consts
+	MAX_BLOCK_REQUESTS = 10
+)
+
 // magnet link information
 type MagnetInfo struct {
 	ExactTopic   string
@@ -13,6 +37,9 @@ type FileInfo struct {
 	Length int    // "length" : Length of the file
 	Path   string // "path" : for multi file mode, same as Name for single file
 	Md5sum string // "md5sum" : (optional)
+
+	Begin int // begin offset of the file
+	End   int // end offset of the file
 }
 
 // metainfo, .torrent file
@@ -31,8 +58,19 @@ type TorrentInfo struct {
 	InfoHash     []byte      // sha1 of info dict
 
 	// generated
-	NumPieces uint64 // number of pieces in the file
-	FileSize  uint64 // size of the entire file or directory
+	IsMultiFile bool
+	NumPieces   uint64 // number of pieces in the file
+	FileSize    uint64 // size of the entire file or directory
+}
+
+// peer info
+type PeerInfo struct {
+	Ip       net.IP
+	Port     uint16
+	Key      uint64
+	Conn     net.Conn
+	PeerId   []byte
+	IsActive bool
 }
 
 // tracker Announce request
@@ -96,7 +134,7 @@ type MessageRequest struct {
 	Length     uint32
 }
 
-type MessagePiece struct {
+type MessagePieceBlock struct {
 	PieceIndex uint32
 	Begin      uint32
 	Block      []byte
@@ -110,4 +148,12 @@ type MessageCancel struct {
 
 type MessagePort struct {
 	Port uint16
+}
+
+type MessagePieceCompleted struct {
+	PieceIndex uint32
+}
+
+type MessagePieceCancelled struct {
+	PieceIndex uint32
 }

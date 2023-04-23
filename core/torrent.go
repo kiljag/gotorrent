@@ -5,148 +5,132 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"time"
 )
-
-type FileParams struct {
-	InfoHash        []byte
-	FileLength      int
-	NumPieces       int
-	PieceLength     int
-	LastPieceLength int
-	PieceHashes     []byte // len : NumPieces * 20
-}
 
 type Torrent struct {
 	// info
-	tinfo *TorrentInfo
-	minfo *MagnetInfo
+	torrentInfo    *TorrentInfo
+	torrentChannel chan interface{} // to send out messages, alerts etc.
+	clientId       []byte           // self generated client id (20 bytes)
 
-	// peers and pieces
-	clientId     []byte // self generated client id (20 bytes)
-	bitField     []byte
-	alertChannel chan string
-	trackers     map[string]*Tracker // announce -> tracker
-	peers        map[string]*Peer    // ip -> peer
-	pieceChannel chan int
-	pieceMap     map[int]*Piece
+	// trackers
+	trackerMap     map[string]*Tracker // announce -> tracker
+	trackerChannel chan interface{}    // to receive messages from trackers
+
+	// peers
+	peerInfoMap   map[uint64]*PeerInfo // peer -> peer
+	activePeerMap map[uint64]*Peer     // peer.key -> peer
+	peerChannel   chan *MessageParams  // to receive messages from peers
+
+	// pieces
+	pieceManager     *PieceManager
+	pieceMap         map[int]bool // whether piece is scheduled or not
+	pieceReplication map[int]int  // piece index -> replication count
 }
 
-func NewTorrent() *Torrent {
+func NewTorrent(torrentInfo *TorrentInfo) *Torrent {
+
+	fmt.Printf("info hash : %x\n", torrentInfo.InfoHash)
+	fmt.Println("file length : ", torrentInfo.FileSize)
+	fmt.Println("piece length : ", torrentInfo.PieceLength)
+	fmt.Println("num pieces :", torrentInfo.NumPieces)
+
 	return &Torrent{
-		clientId:     GeneratePeerId(),
-		bitField:     nil,
-		alertChannel: make(chan string),
+		torrentInfo:    torrentInfo,
+		torrentChannel: make(chan interface{}),
+		clientId:       GeneratePeerId(),
 
-		trackers:     make(map[string]*Tracker, 0),
-		peers:        make(map[string]*Peer, 0),
-		pieceChannel: make(chan int),
-		pieceMap:     make(map[int]*Piece),
+		trackerMap:     make(map[string]*Tracker, 0),
+		trackerChannel: make(chan interface{}),
+
+		peerInfoMap:   make(map[uint64]*PeerInfo),
+		activePeerMap: make(map[uint64]*Peer),
+		peerChannel:   make(chan *MessageParams),
+
+		pieceManager:     NewPieceManager(torrentInfo),
+		pieceMap:         make(map[int]bool),
+		pieceReplication: make(map[int]int),
 	}
 }
 
-func (t *Torrent) AddTorrent(tinfo *TorrentInfo) {
-	t.tinfo = tinfo
+func (t *Torrent) start() chan interface{} {
+	go t.startTorrent()
+	return t.torrentChannel
 }
 
-func (t *Torrent) AddMagnetLink(minfo *MagnetInfo) {
-	t.minfo = minfo
-}
+func (t *Torrent) startTorrent() {
 
-func (t *Torrent) Start() chan string {
-	go t.start()
-	return t.alertChannel
-}
-
-// torrent state machine
-func (t *Torrent) start() {
-
-	// generate torrent params
-	if t.tinfo == nil {
-		panic("no torrent info given")
-	}
-
-	length := 0
-	for _, f := range t.tinfo.Files {
-		length += f.Length
-	}
-
-	fmt.Printf("info hash : %x\n", t.tinfo.InfoHash)
-	fmt.Println("file length : ", t.tinfo.FileSize)
-	fmt.Println("piece length : ", t.tinfo.PieceLength)
-	fmt.Println("num pieces :", t.tinfo.NumPieces)
-
-	// bitfield
-	bl := t.tinfo.NumPieces / 8
-	if t.tinfo.NumPieces%8 != 0 {
-		bl++
-	}
-	t.bitField = make([]byte, bl)
-
-	done := make(chan bool)
-	go t.collectPieces(done)
-	go t.schedulePieces(done)
-
-	<-done
-	<-done
-	t.alertChannel <- "done"
-}
-
-func (t *Torrent) schedulePieces(done chan bool) {
+	go t.pieceManager.start()
+	go t.handlePeerChannel()
+	go t.handleTrackerChannel()
 
 	pbytes := []byte{127, 0, 0, 1, 247, 222}
 	ip := net.IP(pbytes[:4])
 	port := binary.BigEndian.Uint16(pbytes[4:6])
-	conn, peerId, err := StartHandshake(ip, port, t.tinfo.InfoHash, t.clientId)
+	peerInfo := &PeerInfo{
+		Ip:   ip,
+		Port: port,
+		Key:  GeneratePeerKey(ip, port),
+	}
+
+	err := StartHandshake(peerInfo, t.torrentInfo.InfoHash, t.clientId)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Println("creating new peer : ", conn.RemoteAddr().String())
-	peer := NewPeer(conn, peerId, t.tinfo, t.pieceChannel)
-	peer.Start(t.bitField)
+	fmt.Println("creating new peer : ", peerInfo.Conn.RemoteAddr().String())
+	peer := NewPeer(peerInfo, t.torrentInfo, t.pieceManager)
+	peer.start(t.peerChannel)
 
-	// pi := 0
-	// piece := NewPiece(pi, t.tinfo.PieceLength)
-	// t.pieceMap[pi] = piece
-	// peer.AddPieceToQ(piece)
-
-	for pi := 0; pi < int(t.tinfo.NumPieces); pi++ {
-		pieceLength := t.tinfo.PieceLength
-		offset := pi * t.tinfo.PieceLength
-		if (t.tinfo.FileSize - uint64(offset)) < uint64(pieceLength) {
-			pieceLength = int(t.tinfo.FileSize) - offset
-		}
-
-		piece := NewPiece(pi, pieceLength)
-		t.pieceMap[pi] = piece
-		peer.AddPieceToQ(piece)
+	for pi := 0; pi < int(t.torrentInfo.NumPieces); pi++ {
+		peer.AddPieceToQ(pi)
 	}
 
-	done <- true
+	<-time.After(5 * time.Minute)
+	t.torrentChannel <- "done"
 }
 
-func (t *Torrent) collectPieces(done chan bool) {
+// process messages received from trackers
+func (t *Torrent) handleTrackerChannel() {
+
+}
+
+// process messages received from peers
+func (t *Torrent) handlePeerChannel() {
+
+	downloaded := 0
 
 	for {
-		pi, ok := <-t.pieceChannel
+		msg, ok := <-t.peerChannel
 		if !ok {
 			fmt.Println("piece channel is closed")
 			break
 		}
-		fmt.Println("got piece :", pi)
 
-		// verify piece
-		piece := t.pieceMap[pi]
-		hoff := 20 * pi
-		phash := t.tinfo.PieceHashes[hoff : hoff+20]
-		chash := sha1.Sum(piece.Data)
+		switch msg.Type {
+		case MESSAGE_PIECE_COMPLETED:
+			v := msg.Data.(*MessagePieceCompleted)
+			pi := v.PieceIndex
+			// verify hash
+			piece := t.pieceManager.pieceMap[int(pi)]
+			phash := t.torrentInfo.PieceHashes[20*pi : 20*(pi+1)]
+			chash := sha1.Sum(piece.data)
 
-		if CompareBytes(phash, chash[:]) {
-			fmt.Printf("verified piece hash for : %d\n", pi)
-		} else {
-			fmt.Printf("Hash Mismatch : got(%x), wanted(%x)\n", chash, phash)
+			if CompareBytes(phash, chash[:]) {
+				fmt.Printf("got piece %d, .. verified\n", pi)
+				t.pieceManager.completePiece(int(pi))
+				downloaded++
+			} else {
+				fmt.Printf("Hash Mismatch : got(%x), wanted(%x)\n", chash, phash)
+			}
+
+		case MESSAGE_PIECE_CANCELLED:
+
+		case MESSAGE_BITFIELD:
+
+		case MESSAGE_HAVE:
 		}
 	}
-	done <- true
 }

@@ -95,25 +95,26 @@ func PeerHandShake() {
 	port := binary.BigEndian.Uint16(pbytes[4:])
 	clientId := gtc.GeneratePeerId()
 
-	conn, peerId, err := gtc.StartHandshake(ip, port, infoHash, clientId)
-	if err != nil {
-		fmt.Println(err)
-		return
+	peerInfo := &gtc.PeerInfo{
+		Ip:   ip,
+		Port: port,
 	}
-	fmt.Printf("conn : %s\n", conn.RemoteAddr().String())
-	fmt.Printf("peerId : %x\n", peerId)
+
+	err := gtc.StartHandshake(peerInfo, infoHash, clientId)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func TestTorrent() {
-	tparams, err := gtc.ParseTorrentFile("../res/sintel_trailer-480p.mp4.torrent")
+
+	tm := gtc.NewTorrentManager()
+	tChannel, err := tm.AddTorrent("../res/sintel_trailer-480p.mp4.torrent")
 	if err != nil {
-		fmt.Println(err)
-		return
+		panic(err)
 	}
-	torrent := gtc.NewTorrent()
-	torrent.AddTorrent(tparams)
-	done := torrent.Start()
-	<-done
+
+	<-tChannel
 }
 
 func main() {

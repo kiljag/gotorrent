@@ -10,17 +10,18 @@ const (
 	PROTOCOL = "BitTorrent protocol"
 )
 
-// start handshake with peer, returns (conn, peerId, error)
-func StartHandshake(ip net.IP, port uint16, infoHash []byte, clientId []byte) (net.Conn, []byte, error) {
+// start handshake with peer
+func StartHandshake(peerInfo *PeerInfo, infoHash []byte, clientId []byte) error {
 
 	// start tcp connection with remote peer
-	addr := fmt.Sprintf("%s:%d", ip.String(), port)
+	addr := fmt.Sprintf("%s:%d", peerInfo.Ip, peerInfo.Port)
+
 	// p.conn, err := net.Dial("tcp", addr)
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	fmt.Printf("connected to %s:%d\n", ip, port)
+	fmt.Printf("connected to peer %s:%d\n", peerInfo.Ip, peerInfo.Port)
 
 	// intiate handshake
 	sh := &HandShakeParams{
@@ -38,20 +39,20 @@ func StartHandshake(ip net.IP, port uint16, infoHash []byte, clientId []byte) (n
 
 	err = sendHandShake(conn, sh)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	rh, err := recvHandShake(conn)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	// verify handshake
 	if rh.Pstr != PROTOCOL {
-		return nil, nil, fmt.Errorf("invalid protocol string %s", rh.Pstr)
+		return fmt.Errorf("invalid protocol string %s", rh.Pstr)
 	}
 	if !CompareBytes(rh.InfoHash[:], sh.InfoHash[:]) {
-		return nil, nil, fmt.Errorf("invalid info hash, sent %x, recv %x", sh.InfoHash, rh.InfoHash)
+		return fmt.Errorf("invalid info hash, sent %x, recv %x", sh.InfoHash, rh.InfoHash)
 	}
 
 	// save peerId
@@ -59,7 +60,11 @@ func StartHandshake(ip net.IP, port uint16, infoHash []byte, clientId []byte) (n
 	copy(peerId, rh.PeerId)
 
 	fmt.Println("successful handshake")
-	return conn, peerId, nil
+	peerInfo.Conn = conn
+	peerInfo.PeerId = peerId
+	peerInfo.IsActive = true
+
+	return nil
 }
 
 // recv and send handshake, returns (peerId, error)

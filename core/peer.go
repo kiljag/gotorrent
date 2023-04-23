@@ -1,32 +1,10 @@
 package core
 
 import (
-	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"time"
-)
-
-const (
-	MESSAGE_CHOKE          = 0x00
-	MESSAGE_UNCHOKE        = 0x01
-	MESSAGE_INTERESTED     = 0x02
-	MESSAGE_NOT_INTERESTED = 0x03
-	MESSAGE_HAVE           = 0x04
-	MESSAGE_BITFIELD       = 0x05
-	MESSAGE_REQUEST        = 0x06
-	MESSAGE_PIECE          = 0x07
-	MESSAGE_CANCEL         = 0x08
-	MESSAGE_PORT           = 0x09
-
-	// custom types
-	MESSAGE_KEEPALIVE = 0x10
-	MESSAGE_CONNECTED = 0x20
-
-	// piece queue consts
-	BLOCK_LENGTH       = 16 * 1024 // 16KB
-	MAX_BLOCK_REQUESTS = 10
 )
 
 func createMsgMap() map[uint8]string {
@@ -38,23 +16,23 @@ func createMsgMap() map[uint8]string {
 	msgIdMap[MESSAGE_HAVE] = "have"
 	msgIdMap[MESSAGE_BITFIELD] = "bitfield"
 	msgIdMap[MESSAGE_REQUEST] = "request"
-	msgIdMap[MESSAGE_PIECE] = "piece"
+	msgIdMap[MESSAGE_PIECE_BLOCK] = "piece+block"
 	msgIdMap[MESSAGE_CANCEL] = "cancel"
 	msgIdMap[MESSAGE_PORT] = "port"
 	msgIdMap[MESSAGE_KEEPALIVE] = "keepalive"
-
 	return msgIdMap
 }
 
 type Peer struct {
-	conn   net.Conn
-	tinfo  *TorrentInfo // torrent info
-	key    uint64       // key to uniquely identify peer
-	peerId []byte       // 20 bytes
+	conn         net.Conn
+	key          uint64 // key to uniquely identify peer
+	peerInfo     *PeerInfo
+	torrentInfo  *TorrentInfo
+	pieceManager *PieceManager // to directly get the piece block
 
 	// peer state
 	am_choking      bool // this client is choking the peer
-	am_interested   bool // this client is intereted in the peer
+	am_interested   bool // this client is intereted in peer
 	peer_choking    bool // peer is choking this client
 	peer_interested bool // peer is interested in this client
 	bitField        []byte
@@ -63,86 +41,144 @@ type Peer struct {
 	downloaded uint64 // bytes downloaded from this peer
 	uploaded   uint64 // bytes uploaded to this peer
 
-	// piece queue
-	pieceChannel chan int       // channel to send downloaded piece indices
-	pieceQueue   []int          // list of piece indices
-	pieceMap     map[int]*Piece // piece index -> piece data
+	// pieces to get from peer
+	pieceQueue []int        // list of piece indices
+	pieceMap   map[int]bool // piece index -> presence in Q
+
+	// external channels
+	peerChannel chan *MessageParams // channel to send downloaded messages outside
 
 	// internal channels
-	blocksFromPeer   chan *MessagePiece   // channel to receive blocks from peer
-	requestsFromPeer chan *MessageRequest // channel to receive block requests from peer
-	toPeer           chan *MessageParams  // messages to peer
+	blocksFromPeer   chan *MessagePieceBlock // channel to receive blocks from peer
+	requestsFromPeer chan *MessageRequest    // channel to receive block requests from peer
+	toPeer           chan *MessageParams     // messages to peer
 
 	// utlity maps
 	msgIdMap map[uint8]string
 }
 
-func NewPeer(conn net.Conn, peerId []byte, tinfo *TorrentInfo, pieceChannel chan int) *Peer {
-
-	// generate key
-	kbytes := sha1.Sum([]byte(conn.RemoteAddr().String()))
-	var key uint64
-	binary.BigEndian.PutUint64(kbytes[:8], key)
-
-	// initialize bitfield
-	bl := tinfo.NumPieces / 8
-	if tinfo.NumPieces%8 != 0 {
-		bl++
-	}
-	bitField := make([]byte, bl)
+func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceManager) *Peer {
 
 	p := &Peer{
-		conn:   conn,
-		tinfo:  tinfo,
-		key:    key,
-		peerId: peerId,
+		conn:         peerInfo.Conn,
+		key:          peerInfo.Key,
+		peerInfo:     peerInfo,
+		torrentInfo:  torrentInfo,
+		pieceManager: pieceManager,
 
 		am_choking:      true,
 		am_interested:   false,
 		peer_choking:    true,
 		peer_interested: false,
-		bitField:        bitField,
+		bitField:        make([]byte, len(pieceManager.bitField)),
 
 		downloaded: 0,
 		uploaded:   0,
 
-		pieceChannel: pieceChannel,
-		pieceQueue:   make([]int, 0),
-		pieceMap:     make(map[int]*Piece),
+		pieceQueue: make([]int, 0),
+		pieceMap:   make(map[int]bool),
 
-		blocksFromPeer:   make(chan *MessagePiece),
+		peerChannel: nil,
+
+		blocksFromPeer:   make(chan *MessagePieceBlock),
 		requestsFromPeer: make(chan *MessageRequest),
 		toPeer:           make(chan *MessageParams),
 
 		msgIdMap: createMsgMap(),
 	}
-	// copy(p.clientId, clientId)
 	return p
 }
 
-// send client's bitfile to peer, right after init
-func (p *Peer) Start(bitField []byte) chan *MessageParams {
-	go p.start()
-	p.toPeer <- &MessageParams{
+func (p *Peer) start(peerChannel chan *MessageParams) {
+	p.peerChannel = peerChannel
+	go p.startPeer()
+}
+
+// peer state machine
+func (p *Peer) startPeer() {
+
+	defer p.conn.Close()
+
+	go p.handleRequestsToPeer()
+	go p.handleRequestsFromPeer()
+
+	// send client's bitfild to peer as first message
+	p.sendMessage(&MessageParams{
 		Type: MESSAGE_BITFIELD,
 		Data: &MessageBitField{
-			BitField: bitField,
+			BitField: p.pieceManager.bitField,
 		},
-	}
+	})
 
-	return p.toPeer
+	keepAlive := int64(0)
+
+	for {
+		// should check something to break out of loop
+
+		// send keepalive for every 2 minutes
+		if time.Now().Unix()-keepAlive > 120 {
+			err := p.sendMessage(&MessageParams{
+				Type: MESSAGE_KEEPALIVE,
+			})
+			if err != nil {
+				fmt.Println("peer error in sending keepalive")
+				break
+			}
+			keepAlive = time.Now().Unix()
+		}
+
+		// if the tcp socket is readable, read 4 bytes (msg len) with deadline
+		buf := make([]byte, 4)
+		p.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		n, _ := p.conn.Read(buf[:4])
+		if n != 0 {
+			if n > 0 && n < 4 {
+				RecvNBytes(p.conn, buf[n:4])
+			}
+			mlen := binary.BigEndian.Uint32(buf[:4])
+			if mlen > 32*1024 { // if mlen is too large, disconnect from peer
+				fmt.Printf("peer error received mlen (%d) is too large", mlen)
+				break
+			}
+			msg, err := p.recvMessage(mlen)
+			// fmt.Println("received message from peer ", p.msgIdMap[msg.Type])
+			if err != nil {
+				fmt.Println("peer error in reading message")
+				break
+			}
+			if msg != nil {
+				switch msg.Type {
+				case MESSAGE_PIECE_BLOCK:
+					v := msg.Data.(*MessagePieceBlock)
+					p.blocksFromPeer <- v
+
+				case MESSAGE_REQUEST:
+					v := msg.Data.(*MessageRequest)
+					p.requestsFromPeer <- v
+
+				case MESSAGE_HAVE:
+					p.peerChannel <- msg
+				}
+			}
+		}
+
+		// if there are messages to be sent to peer
+		select {
+		case v := <-p.toPeer:
+			p.sendMessage(v)
+		default:
+		}
+	}
 }
 
 // add new piece to the Queue
-func (p *Peer) AddPieceToQ(piece *Piece) {
-	pi := piece.Index
+func (p *Peer) AddPieceToQ(pi int) {
 	p.pieceQueue = append(p.pieceQueue, pi)
-	p.pieceMap[pi] = piece
+	p.pieceMap[pi] = true
 }
 
 // remove scheduled piece from Queue
-func (p *Peer) RemovePieceFromQ(piece *Piece) {
-	pi := piece.Index
+func (p *Peer) RemovePieceFromQ(pi int) {
 	delete(p.pieceMap, pi)
 }
 
@@ -151,20 +187,18 @@ func (p *Peer) ContainsPiece(pi int) bool {
 	return IsSet(p.bitField, pi)
 }
 
-// Goroutine : handle piece requests from peer
+// Goroutine : handle piece block requests from peer
 func (p *Peer) handleRequestsFromPeer() {
-
 	for {
 		_, ok := <-p.requestsFromPeer
 		if !ok {
 			break
 		}
-
 		fmt.Println("received request from peer")
 	}
 }
 
-// Goroutine :  handle piece requests to peer, job is to download the entire piece
+// Goroutine :  downloaded pieces from peer
 func (p *Peer) handleRequestsToPeer() {
 
 	for {
@@ -174,15 +208,24 @@ func (p *Peer) handleRequestsToPeer() {
 			continue
 		}
 
-		// ignore if piece is removed from queue, otherwise download
 		pi := p.pieceQueue[0]
 		err := p.getPiece(pi)
 		if err != nil {
 			fmt.Printf("error downloading piece %d : %s\n", pi, err)
+			p.peerChannel <- &MessageParams{
+				Type: MESSAGE_PIECE_CANCELLED,
+				Data: &MessagePieceCancelled{
+					PieceIndex: uint32(pi),
+				},
+			}
 		} else {
-			p.pieceChannel <- pi
+			p.peerChannel <- &MessageParams{
+				Type: MESSAGE_PIECE_COMPLETED,
+				Data: &MessagePieceCompleted{
+					PieceIndex: uint32(pi),
+				},
+			}
 		}
-
 		// increment offset
 		p.pieceQueue = p.pieceQueue[1:]
 	}
@@ -191,19 +234,19 @@ func (p *Peer) handleRequestsToPeer() {
 // get a piece block wise
 func (p *Peer) getPiece(pi int) error {
 
-	piece := p.pieceMap[pi]
-	piece.Status = PIECE_IN_PROGRESS
-	piece.ScheduledTime = time.Now().Unix()
+	piece := p.pieceManager.getPiece(pi)
+	piece.status = PIECE_IN_PROGRESS
+	piece.scheduledTime = time.Now().Unix()
 
 	// prepare block requests
 	reqs := make([]*MessageRequest, 0)
-	for off := 0; off < piece.Length; off += BLOCK_LENGTH {
-		blen := BLOCK_LENGTH
-		if piece.Length-off < blen {
-			blen = piece.Length - off
+	for off := 0; off < piece.length; off += PIECE_BLOCK_LENGTH {
+		blen := PIECE_BLOCK_LENGTH
+		if piece.length-off < blen {
+			blen = piece.length - off
 		}
 		m := &MessageRequest{
-			PieceIndex: uint32(piece.Index),
+			PieceIndex: uint32(pi),
 			Begin:      uint32(off),
 			Length:     uint32(blen),
 		}
@@ -214,6 +257,10 @@ func (p *Peer) getPiece(pi int) error {
 	requestQ := make(map[uint32]*MessageRequest, 0) // block offset -> request
 
 	for len(reqs) > 0 || len(requestQ) > 0 {
+		// see if the piece is removed from queue
+		if !p.pieceMap[pi] {
+			return fmt.Errorf("piece %d is removed from queue", pi)
+		}
 
 		// send interested if not set
 		if !p.am_interested {
@@ -240,83 +287,31 @@ func (p *Peer) getPiece(pi int) error {
 			reqs = reqs[1:]
 		}
 
-		// check if peer sent blocks
+		// check if blocks are sent by peer
 		select {
 		case msg := <-p.blocksFromPeer:
-			delete(requestQ, msg.Begin)
-
+			if msg.PieceIndex == uint32(pi) {
+				delete(requestQ, msg.Begin)
+			}
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 
-	piece.Status = PIECE_COMPLETED
-	piece.CompletionTime = time.Now().Unix()
+	piece.status = PIECE_COMPLETED
+	piece.completionTime = time.Now().Unix()
 	return nil
-}
-
-// peer state machine
-func (p *Peer) start() {
-
-	go p.handleRequestsToPeer()
-	go p.handleRequestsFromPeer()
-
-	for {
-		// if the tcp socket is readable, read 4 bytes (msg len) with deadline
-		buf := make([]byte, 4)
-		p.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		n, _ := p.conn.Read(buf[:4])
-		if n != 0 {
-			if n > 0 && n < 4 {
-				RecvNBytes(p.conn, buf[n:4])
-			}
-
-			mlen := binary.BigEndian.Uint32(buf[:4])
-			msg, err := p.recvMessage(mlen)
-			if err != nil {
-				fmt.Println(err)
-			}
-			if msg != nil {
-				switch msg.Type {
-				case MESSAGE_PIECE:
-					v := msg.Data.(*MessagePiece)
-					p.blocksFromPeer <- v
-
-				case MESSAGE_REQUEST:
-					v := msg.Data.(*MessageRequest)
-					p.requestsFromPeer <- v
-				}
-			}
-		}
-
-		// if there are messages to be sent to peer
-		toPeerClosed := false
-		select {
-		case v, ok := <-p.toPeer:
-			if !ok {
-				fmt.Println("toPeer is closed")
-				toPeerClosed = true
-			} else {
-				p.sendMessage(v)
-			}
-		default:
-		}
-
-		if toPeerClosed {
-			break
-		}
-	}
 }
 
 // send message to peer, update relevant fields accordingly
 func (p *Peer) sendMessage(message *MessageParams) error {
+
+	// fmt.Println("msg to peer : ", p.msgIdMap[message.Type])
 
 	if message.Type == MESSAGE_KEEPALIVE {
 		k := make([]byte, 4)
 		binary.BigEndian.PutUint32(k, uint32(0))
 		return SendNBytes(p.conn, k)
 	}
-
-	// fmt.Printf("msg type : %d\n", message.Type)
 
 	// prepare data payload
 	payload := make([]byte, 5)
@@ -355,8 +350,8 @@ func (p *Peer) sendMessage(message *MessageParams) error {
 		binary.BigEndian.PutUint32(h[8:12], v.Length)
 		payload = append(payload, h...)
 
-	case MESSAGE_PIECE:
-		v := message.Data.(*MessagePiece)
+	case MESSAGE_PIECE_BLOCK:
+		v := message.Data.(*MessagePieceBlock)
 		h := make([]byte, 8)
 		binary.BigEndian.PutUint32(h[0:4], v.PieceIndex)
 		binary.BigEndian.PutUint32(h[4:8], v.Begin)
@@ -399,7 +394,7 @@ func (p *Peer) sendMessage(message *MessageParams) error {
 
 // read message from peer, update relelvant fields accordingly
 func (p *Peer) recvMessage(mlen uint32) (*MessageParams, error) {
-	// fmt.Println("recvMessage ::")
+
 	buf := make([]byte, 32)
 	if mlen == 0 {
 		message := &MessageParams{
@@ -429,20 +424,20 @@ func (p *Peer) recvMessage(mlen uint32) (*MessageParams, error) {
 	}
 
 	// handle piece message
-	if mtype == MESSAGE_PIECE {
+	if mtype == MESSAGE_PIECE_BLOCK {
 		headers := make([]byte, 8)
 		RecvNBytes(p.conn, headers)
 		pi := binary.BigEndian.Uint32(headers[0:4])
 		begin := binary.BigEndian.Uint32(headers[4:8])
 		len := mlen - 9
 		var data []byte
-		if piece, ok := p.pieceMap[int(pi)]; ok {
-			data = piece.Data[begin : begin+len]
-		} else {
-			data = make([]byte, 16) // to be discarded
+		if p.pieceMap[int(pi)] { // piece is in peer queue
+			data = p.pieceManager.pieceMap[int(pi)].data[begin : begin+len]
+		} else { // read the data to discard
+			data = p.pieceManager.dummy.data[begin : begin+len]
 		}
 		RecvNBytes(p.conn, data)
-		message.Data = &MessagePiece{
+		message.Data = &MessagePieceBlock{
 			PieceIndex: pi,
 			Begin:      begin,
 			Block:      data,

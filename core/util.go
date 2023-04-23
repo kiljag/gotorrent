@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
 	"net"
 )
 
@@ -17,17 +18,11 @@ func GeneratePeerId() []byte {
 	return id
 }
 
-func GeneratePeerKey(ip []byte, port uint16) uint64 {
-
-	b := make([]byte, len(ip))
-	pb := make([]byte, 2)
-	binary.BigEndian.PutUint16(pb, port)
-	b = append(b, pb...)
-	hb := sha1.Sum(b)
-	key := uint64(0)
-	// take first 8 bytes of key as hash
-	binary.BigEndian.PutUint64(hb[:8], key)
-
+func GeneratePeerKey(ip net.IP, port uint16) uint64 {
+	ipstr := fmt.Sprintf("%s:%d", ip, port)
+	kbytes := sha1.Sum([]byte(ipstr))
+	var key uint64
+	binary.BigEndian.PutUint64(kbytes[:8], key)
 	return key
 }
 

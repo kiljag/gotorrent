@@ -81,6 +81,15 @@ func ParseTorrentFile(tpath string) (*TorrentInfo, error) {
 	}
 	tinfo.FileSize = fsize
 
+	// calculate offsets
+	fileBegin := 0
+	for _, fileInfo := range tinfo.Files {
+		fileEnd := fileBegin + fileInfo.Length
+		fileInfo.Begin = fileBegin
+		fileInfo.End = fileEnd
+		fileBegin = fileEnd
+	}
+
 	return tinfo, nil
 }
 
@@ -120,14 +129,19 @@ func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) error {
 				case "length":
 					fileInfo.Length = v.(int)
 				case "path":
-					fileInfo.Path = v.(string)
+					plist := v.([]interface{})
+					elist := make([]string, 0)
+					for _, e := range plist {
+						elist = append(elist, e.(string))
+					}
+					fileInfo.Path = strings.Join(elist, "/")
 				case "md5sum":
 					fileInfo.Md5sum = v.(string)
 				}
 			}
 			tinfo.Files = append(tinfo.Files, fileInfo)
 		}
-
+		tinfo.IsMultiFile = true
 		return nil
 	}
 
