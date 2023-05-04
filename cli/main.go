@@ -31,24 +31,6 @@ func TestParseMagnetLink() {
 	}
 }
 
-func TestParseTorrentFile() {
-	tinfo, err := gtc.ParseTorrentFile("../ubuntu-22.10-desktop-amd64.iso.torrent")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("announce : ", tinfo.Announce)
-	fmt.Println("announce-list : ", tinfo.AnnounceList)
-	fmt.Println("creation date : ", tinfo.CreationDate)
-	fmt.Println("piece length : ", tinfo.PieceLength)
-	fmt.Println("num pieces : ", len(tinfo.PieceHashes))
-	fmt.Println("name : ", tinfo.Name)
-	fmt.Println("#pieces : ", len(tinfo.PieceHashes)/20)
-	fmt.Printf("hash %x\n", tinfo.InfoHash)
-	for _, f := range tinfo.Files {
-		fmt.Printf("fileInfo : path : (%s), len (%d)\n", f.Path, f.Length)
-	}
-}
-
 func TestTrackerGet() {
 
 	announce := "https://torrent.ubuntu.com/announce"
@@ -119,5 +101,5 @@ func TestTorrent() {
 }
 
 func main() {
-	TestTorrent()
+	// TestTorrent()
 }
