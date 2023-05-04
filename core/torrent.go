@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
@@ -32,7 +33,7 @@ type Torrent struct {
 func NewTorrent(torrentInfo *TorrentInfo) *Torrent {
 
 	fmt.Printf("info hash : %x\n", torrentInfo.InfoHash)
-	fmt.Println("file length : ", torrentInfo.FileSize)
+	fmt.Println("file length : ", torrentInfo.Length)
 	fmt.Println("piece length : ", torrentInfo.PieceLength)
 	fmt.Println("num pieces :", torrentInfo.NumPieces)
 
@@ -80,7 +81,8 @@ func (t *Torrent) startTorrent() {
 		return
 	}
 
-	fmt.Println("creating new peer : ", peerInfo.Conn.RemoteAddr().String())
+	fmt.Printf("creating new peer : %s -> %s\n",
+		peerInfo.Conn.LocalAddr(), peerInfo.Conn.RemoteAddr())
 	peer := NewPeer(peerInfo, t.torrentInfo, t.pieceManager)
 	peer.start(t.peerChannel)
 
@@ -116,14 +118,15 @@ func (t *Torrent) handlePeerChannel() {
 			// verify hash
 			piece := t.pieceManager.pieceMap[int(pi)]
 			phash := t.torrentInfo.PieceHashes[20*pi : 20*(pi+1)]
-			chash := sha1.Sum(piece.data)
+			chash := sha1.Sum(piece.data[0:piece.length])
 
-			if CompareBytes(phash, chash[:]) {
-				fmt.Printf("got piece %d, .. verified\n", pi)
-				t.pieceManager.completePiece(int(pi))
+			if bytes.Equal(phash, chash[:]) {
+				fmt.Printf("got piece %d, ..verified\n", pi)
+				t.pieceManager.savePiece(int(pi))
 				downloaded++
 			} else {
-				fmt.Printf("Hash Mismatch : got(%x), wanted(%x)\n", chash, phash)
+				fmt.Printf("got piece %d, Hash Mismatch : got(%x), wanted(%x)\n",
+					pi, chash, phash)
 			}
 
 		case MESSAGE_PIECE_CANCELLED:

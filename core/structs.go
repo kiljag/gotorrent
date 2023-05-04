@@ -2,75 +2,51 @@ package core
 
 import "net"
 
-const (
-	MESSAGE_CHOKE          = 0x00
-	MESSAGE_UNCHOKE        = 0x01
-	MESSAGE_INTERESTED     = 0x02
-	MESSAGE_NOT_INTERESTED = 0x03
-	MESSAGE_HAVE           = 0x04
-	MESSAGE_BITFIELD       = 0x05
-	MESSAGE_REQUEST        = 0x06
-	MESSAGE_PIECE_BLOCK    = 0x07
-	MESSAGE_CANCEL         = 0x08
-	MESSAGE_PORT           = 0x09
-
-	// custom types
-	MESSAGE_KEEPALIVE         = 0x10
-	MESSAGE_PEER_DISCONNECTED = 0x20
-	MESSAGE_PIECE_COMPLETED   = 0x30
-	MESSAGE_PIECE_CANCELLED   = 0x40
-
-	// piece queue consts
-	MAX_BLOCK_REQUESTS = 10
-)
-
 // magnet link information
 type MagnetInfo struct {
 	ExactTopic   string
 	DisplayName  string
-	ExactLength  int
+	ExactLength  int64
 	InfoHash     []byte
 	AnnounceList []string
 }
 
 type FileInfo struct {
-	Length int    // "length" : Length of the file
-	Path   string // "path" : for multi file mode, same as Name for single file
+	Length int64  // "length" : Length of the file
+	Path   string // "path" : path of the file
 	Md5sum string // "md5sum" : (optional)
-
-	Begin int // begin offset of the file
-	End   int // end offset of the file
 }
 
 // metainfo, .torrent file
 type TorrentInfo struct {
-	Announce     string      // "announce" : tracker url
-	AnnounceList []string    // "annouce-list" : (optional) tracker urls
-	CreationDate int         // "creation date": (optional) unix epoch time of torrent creation
-	Comment      string      // "comment": (optional) text comment by author
-	CreatedBy    string      // "created by" : (optional) name and version of the program
-	Encoding     string      // "encoding": (optional)
-	PieceLength  int         // "peice length" :length of each piece
-	PieceHashes  []byte      // "pieces" : concatenated list of <20byte-sha1-checksum> of pieces
-	Private      int         // "private" : (optional)
-	Name         string      // "name" : filename or root directory
-	Files        []*FileInfo // list of files, works for both single file and directory structure
-	InfoHash     []byte      // sha1 of info dict
+	Announce     string   // "announce" : tracker url
+	AnnounceList []string // "annouce-list" : (optional) tracker urls
+	CreationDate int64    // "creation date": (optional) unix epoch time of torrent creation
+	Comment      string   // "comment": (optional) text comment by author
+	CreatedBy    string   // "created by" : (optional) name and version of the program
+	Encoding     string   // "encoding": (optional)
+	PieceLength  int64    // "peice length" :length of each piece
+	PieceHashes  []byte   // "pieces" : concatenated list of <20byte-sha1-checksum> of pieces
+	IsPrivate    bool     // "private" : (optional)
+	Name         string   // name of the root directory
+	Length       int64    // length of the complete file
+	Md5sum       string
+	Files        []*FileInfo // list of files, works for both single and multi file structure
 
-	// generated
-	IsMultiFile bool
-	NumPieces   uint64 // number of pieces in the file
-	FileSize    uint64 // size of the entire file or directory
+	// custom fields
+	InfoHash        []byte // sha1 of info dictionary
+	IsMultiFile     bool   // if the torrent has multiple files
+	NumPieces       int64  // number of pieces in the torrent
+	LastPieceLength int64  // last piece length
 }
 
 // peer info
 type PeerInfo struct {
-	Ip       net.IP
-	Port     uint16
-	Key      uint64
-	Conn     net.Conn
-	PeerId   []byte
-	IsActive bool
+	Ip     net.IP
+	Port   uint16
+	Key    uint64
+	Conn   net.Conn
+	PeerId []byte
 }
 
 // tracker Announce request

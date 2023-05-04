@@ -7,6 +7,28 @@ import (
 	"time"
 )
 
+const (
+	MESSAGE_CHOKE          = 0x00
+	MESSAGE_UNCHOKE        = 0x01
+	MESSAGE_INTERESTED     = 0x02
+	MESSAGE_NOT_INTERESTED = 0x03
+	MESSAGE_HAVE           = 0x04
+	MESSAGE_BITFIELD       = 0x05
+	MESSAGE_REQUEST        = 0x06
+	MESSAGE_PIECE_BLOCK    = 0x07
+	MESSAGE_CANCEL         = 0x08
+	MESSAGE_PORT           = 0x09
+
+	// custom types
+	MESSAGE_KEEPALIVE         = 0x10
+	MESSAGE_PEER_DISCONNECTED = 0x20
+	MESSAGE_PIECE_COMPLETED   = 0x30
+	MESSAGE_PIECE_CANCELLED   = 0x40
+
+	// piece queue consts
+	MAX_BLOCK_REQUESTS = 10
+)
+
 func createMsgMap() map[uint8]string {
 	msgIdMap := make(map[uint8]string)
 	msgIdMap[MESSAGE_CHOKE] = "choke"
@@ -28,18 +50,19 @@ type Peer struct {
 	key          uint64 // key to uniquely identify peer
 	peerInfo     *PeerInfo
 	torrentInfo  *TorrentInfo
-	pieceManager *PieceManager // to directly get the piece block
+	pieceManager *PieceManager
 
 	// peer state
 	am_choking      bool // this client is choking the peer
 	am_interested   bool // this client is intereted in peer
 	peer_choking    bool // peer is choking this client
 	peer_interested bool // peer is interested in this client
-	bitField        []byte
+	bitmap          *BitMap
 
 	// peer stats
-	downloaded uint64 // bytes downloaded from this peer
-	uploaded   uint64 // bytes uploaded to this peer
+	keepalive  int64
+	downloaded int64 // bytes downloaded from this peer
+	uploaded   int64 // bytes uploaded to this peer
 
 	// pieces to get from peer
 	pieceQueue []int        // list of piece indices
@@ -70,8 +93,9 @@ func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceMa
 		am_interested:   false,
 		peer_choking:    true,
 		peer_interested: false,
-		bitField:        make([]byte, len(pieceManager.bitField)),
+		bitmap:          NewBitMap(pieceManager.bitmap.length),
 
+		keepalive:  0,
 		downloaded: 0,
 		uploaded:   0,
 
@@ -94,6 +118,46 @@ func (p *Peer) start(peerChannel chan *MessageParams) {
 	go p.startPeer()
 }
 
+// wrapper method to read from peer
+func (p *Peer) readFromPeer() (*MessageParams, error) {
+
+	// if the tcp socket is readable, read first 4 bytes (msg len) with deadline
+	buf := make([]byte, 4)
+	p.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	n, _ := p.conn.Read(buf[:4])
+	if n == 0 { // socket is not readable
+		return nil, nil
+	}
+
+	// reset deadline for 1 minute, effectively blocking
+	// p.conn.SetReadDeadline(time.Now().Add(1 * time.Minute))
+	if n > 0 && n < 4 {
+		fmt.Println("read mlen bytes")
+		RecvNBytes(p.conn, buf[n:4])
+	}
+	mlen := binary.BigEndian.Uint32(buf[:4])
+	if mlen > 256*1024 { // if mlen is too large, disconnect from peer
+		return nil, fmt.Errorf("received mlen (%d) is too large", mlen)
+	}
+
+	msg, err := p.recvMessage(mlen)
+	if err != nil {
+		return nil, err
+	}
+	if msg.Type != MESSAGE_PIECE_BLOCK {
+		fmt.Println("message from peer <= ", p.msgIdMap[msg.Type])
+	}
+	return msg, err
+}
+
+// wrapper method to write to peer
+func (p *Peer) writeToPeer(msg *MessageParams) error {
+	if msg.Type != MESSAGE_REQUEST {
+		fmt.Println("message to peer =>  ", p.msgIdMap[msg.Type])
+	}
+	return p.sendMessage(msg)
+}
+
 // peer state machine
 func (p *Peer) startPeer() {
 
@@ -103,69 +167,58 @@ func (p *Peer) startPeer() {
 	go p.handleRequestsFromPeer()
 
 	// send client's bitfild to peer as first message
-	p.sendMessage(&MessageParams{
+	p.writeToPeer(&MessageParams{
 		Type: MESSAGE_BITFIELD,
 		Data: &MessageBitField{
-			BitField: p.pieceManager.bitField,
+			BitField: p.pieceManager.bitmap.Bytes(),
 		},
 	})
 
-	keepAlive := int64(0)
-
 	for {
-		// should check something to break out of loop
-
 		// send keepalive for every 2 minutes
-		if time.Now().Unix()-keepAlive > 120 {
-			err := p.sendMessage(&MessageParams{
+		if time.Now().Unix()-int64(p.keepalive) > 120 {
+			err := p.writeToPeer(&MessageParams{
 				Type: MESSAGE_KEEPALIVE,
 			})
+
 			if err != nil {
 				fmt.Println("peer error in sending keepalive")
-				break
 			}
-			keepAlive = time.Now().Unix()
+			p.keepalive = time.Now().Unix()
 		}
 
-		// if the tcp socket is readable, read 4 bytes (msg len) with deadline
-		buf := make([]byte, 4)
-		p.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		n, _ := p.conn.Read(buf[:4])
-		if n != 0 {
-			if n > 0 && n < 4 {
-				RecvNBytes(p.conn, buf[n:4])
-			}
-			mlen := binary.BigEndian.Uint32(buf[:4])
-			if mlen > 32*1024 { // if mlen is too large, disconnect from peer
-				fmt.Printf("peer error received mlen (%d) is too large", mlen)
-				break
-			}
-			msg, err := p.recvMessage(mlen)
-			// fmt.Println("received message from peer ", p.msgIdMap[msg.Type])
-			if err != nil {
-				fmt.Println("peer error in reading message")
-				break
-			}
-			if msg != nil {
-				switch msg.Type {
-				case MESSAGE_PIECE_BLOCK:
-					v := msg.Data.(*MessagePieceBlock)
-					p.blocksFromPeer <- v
+		msg, err := p.readFromPeer()
+		if err != nil {
+			fmt.Println("peer error : ", err)
+			break
+		}
 
-				case MESSAGE_REQUEST:
-					v := msg.Data.(*MessageRequest)
-					p.requestsFromPeer <- v
+		if msg != nil {
+			switch msg.Type {
+			case MESSAGE_PIECE_BLOCK:
+				v := msg.Data.(*MessagePieceBlock)
+				p.blocksFromPeer <- v
 
-				case MESSAGE_HAVE:
-					p.peerChannel <- msg
-				}
+			case MESSAGE_REQUEST:
+				v := msg.Data.(*MessageRequest)
+				p.requestsFromPeer <- v
+
+			case MESSAGE_HAVE:
+				p.peerChannel <- msg
 			}
+		}
+
+		if p.peer_choking {
+			fmt.Println("peer is choking")
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
 		// if there are messages to be sent to peer
 		select {
 		case v := <-p.toPeer:
-			p.sendMessage(v)
+			p.writeToPeer(v)
+
 		default:
 		}
 	}
@@ -184,7 +237,7 @@ func (p *Peer) RemovePieceFromQ(pi int) {
 
 // if peer contains a particular piece
 func (p *Peer) ContainsPiece(pi int) bool {
-	return IsSet(p.bitField, pi)
+	return p.bitmap.IsSet(pi)
 }
 
 // Goroutine : handle piece block requests from peer
@@ -235,8 +288,6 @@ func (p *Peer) handleRequestsToPeer() {
 func (p *Peer) getPiece(pi int) error {
 
 	piece := p.pieceManager.getPiece(pi)
-	piece.status = PIECE_IN_PROGRESS
-	piece.scheduledTime = time.Now().Unix()
 
 	// prepare block requests
 	reqs := make([]*MessageRequest, 0)
@@ -297,15 +348,11 @@ func (p *Peer) getPiece(pi int) error {
 		}
 	}
 
-	piece.status = PIECE_COMPLETED
-	piece.completionTime = time.Now().Unix()
 	return nil
 }
 
 // send message to peer, update relevant fields accordingly
 func (p *Peer) sendMessage(message *MessageParams) error {
-
-	// fmt.Println("msg to peer : ", p.msgIdMap[message.Type])
 
 	if message.Type == MESSAGE_KEEPALIVE {
 		k := make([]byte, 4)
@@ -406,7 +453,10 @@ func (p *Peer) recvMessage(mlen uint32) (*MessageParams, error) {
 	}
 
 	// recv 1 byte (message type param)
-	RecvNBytes(p.conn, buf[0:1])
+	err := RecvNBytes(p.conn, buf[0:1])
+	if err != nil {
+		return nil, err
+	}
 	mtype := buf[0]
 	message := &MessageParams{
 		Length: mlen,
@@ -416,9 +466,12 @@ func (p *Peer) recvMessage(mlen uint32) (*MessageParams, error) {
 
 	// handle bitfield message
 	if mtype == MESSAGE_BITFIELD {
-		RecvNBytes(p.conn, p.bitField)
+		err = RecvNBytes(p.conn, p.bitmap.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("bitfield error %s", err)
+		}
 		message.Data = &MessageBitField{
-			BitField: p.bitField,
+			BitField: p.bitmap.Bytes(),
 		}
 		return message, nil
 	}
@@ -468,7 +521,7 @@ func (p *Peer) recvMessage(mlen uint32) (*MessageParams, error) {
 
 	case MESSAGE_HAVE:
 		pi := binary.BigEndian.Uint32(data[0:4])
-		SetBit(p.bitField, int(pi))
+		p.bitmap.SetBit(int(pi))
 		message.Data = &MessageHave{
 			PieceIndex: pi,
 		}

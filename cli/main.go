@@ -109,7 +109,8 @@ func PeerHandShake() {
 func TestTorrent() {
 
 	tm := gtc.NewTorrentManager()
-	tChannel, err := tm.AddTorrent("../res/sintel_trailer-480p.mp4.torrent")
+	// tChannel, err := tm.AddTorrent("../res/sintel_trailer-480p.mp4.torrent")
+	tChannel, err := tm.AddTorrent("../res/sample-trailers.torrent")
 	if err != nil {
 		panic(err)
 	}

@@ -2,17 +2,29 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 )
 
+// bencoding and bdecoding primitives
+/* 4 types can be encoded or decoded
+int64
+string or []byte
+[]interface{}
+[string]interface{}
+*/
+
 func BEncode(input interface{}) ([]byte, error) {
 
 	switch v := input.(type) {
-	case int:
-		return bEncodeInt(v), nil
+	case int, int32, int64:
+		num := reflect.ValueOf(v).Int()
+		return bEncodeInt(num), nil
 	case string:
 		return bEncodeStr(v), nil
+	case []byte:
+		return bEncodeStr(string(v)), nil
 	case []interface{}:
 		return bEncodeList(v)
 	case map[string]interface{}:
@@ -22,10 +34,12 @@ func BEncode(input interface{}) ([]byte, error) {
 	}
 }
 
-func bEncodeInt(i int) []byte {
+func bEncodeInt(i int64) []byte {
+
+	istr := fmt.Sprintf("%d", i)
 	enc := make([]byte, 0)
 	enc = append(enc, 'i')
-	enc = append(enc, []byte(strconv.Itoa(i))...)
+	enc = append(enc, []byte(istr)...)
 	enc = append(enc, 'e')
 	return enc
 }
@@ -48,8 +62,9 @@ func bEncodeList(l []interface{}) ([]byte, error) {
 		var err error
 
 		switch v := e.(type) {
-		case int:
-			b = bEncodeInt(v)
+		case int, int32, int64:
+			num := reflect.ValueOf(v).Int()
+			b = bEncodeInt(num)
 		case string:
 			b = bEncodeStr(v)
 		case []interface{}:
@@ -89,8 +104,9 @@ func bEncodeDict(d map[string]interface{}) ([]byte, error) {
 		var err error
 
 		switch val := v.(type) {
-		case int:
-			vbytes = bEncodeInt(val)
+		case int, int32, int64:
+			num := reflect.ValueOf(val).Int()
+			vbytes = bEncodeInt(num)
 		case string:
 			vbytes = bEncodeStr(val)
 		case []interface{}:
@@ -122,9 +138,9 @@ func findIndex(input []byte, b byte) int {
 
 // input starts with 'i'
 // return (integer, dl, error), dl is number of bencoded bytes, i.e 4 for i31e
-func bDecodeInt(input []byte) (int, int, error) {
+func bDecodeInt(input []byte) (int64, int, error) {
 	e1 := findIndex(input, 'e')
-	dec, err := strconv.Atoi(string(input[1:e1]))
+	dec, err := strconv.ParseInt(string(input[1:e1]), 10, 64)
 	if err != nil {
 		fmt.Println(err)
 	}

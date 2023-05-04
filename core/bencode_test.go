@@ -33,7 +33,7 @@ func TestBEncodeList(t *testing.T) {
 func TestBEncodeDict(t *testing.T) {
 	d := make(map[string]interface{})
 	d["hello"] = "world"
-	d["apples"] = 4
+	d["apples"] = int64(4)
 	enc, _ := bEncodeDict(d)
 	got := string(enc)
 	want := "d6:applesi4e5:hello5:worlde"
@@ -44,7 +44,7 @@ func TestBEncodeDict(t *testing.T) {
 
 func TestBDecodeInt(t *testing.T) {
 	dec, dl, _ := bDecodeInt([]byte("i31e"))
-	wdec := 31
+	wdec := int64(31)
 	wlen := 4
 	if dec != wdec {
 		t.Errorf("bdecode int : got %d, wanted %d", dec, wdec)

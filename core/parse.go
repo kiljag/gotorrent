@@ -41,11 +41,10 @@ func ParseTorrentFile(tpath string) (*TorrentInfo, error) {
 				for _, entry := range entries {
 					tinfo.AnnounceList = append(tinfo.AnnounceList, entry.(string))
 				}
-
 			}
 
 		case "creation date":
-			tinfo.CreationDate = v.(int)
+			tinfo.CreationDate = v.(int64)
 
 		case "comment":
 			tinfo.Comment = v.(string)
@@ -65,61 +64,55 @@ func ParseTorrentFile(tpath string) (*TorrentInfo, error) {
 			tinfo.InfoHash = make([]byte, 20)
 			infoHash := sha1.Sum(ibytes)
 			copy(tinfo.InfoHash, infoHash[:])
-
-			err = parseFileInfo(tinfo, info)
-			if err != nil {
-				return nil, err
-			}
+			parseFileInfo(tinfo, info)
 		}
 	}
 
 	// generated fields
-	tinfo.NumPieces = uint64(len(tinfo.PieceHashes) / 20)
-	fsize := uint64(0)
+	tinfo.NumPieces = int64(len(tinfo.PieceHashes) / 20)
+	tinfo.Length = 0
 	for _, f := range tinfo.Files {
-		fsize += uint64(f.Length)
+		tinfo.Length += int64(f.Length)
 	}
-	tinfo.FileSize = fsize
-
-	// calculate offsets
-	fileBegin := 0
-	for _, fileInfo := range tinfo.Files {
-		fileEnd := fileBegin + fileInfo.Length
-		fileInfo.Begin = fileBegin
-		fileInfo.End = fileEnd
-		fileBegin = fileEnd
-	}
+	tinfo.LastPieceLength = tinfo.Length - (tinfo.NumPieces-1)*tinfo.PieceLength
 
 	return tinfo, nil
 }
 
-// populate torrentinfo
-func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) error {
+// populate torrentinfo, will throw a panic in case of error
+func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) {
 
 	// parse common fields
-	for k, v := range info {
-		switch k {
-		case "piece length":
-			tinfo.PieceLength = v.(int)
+	if v, ok := info["piece length"]; ok {
+		tinfo.PieceLength = v.(int64)
+	}
 
-		case "pieces":
-			pbytes := []byte(v.(string))
-			tinfo.PieceHashes = pbytes
+	if v, ok := info["pieces"]; ok {
+		pbytes := []byte(v.(string))
+		tinfo.PieceHashes = pbytes
+	}
 
-		case "private":
-			tinfo.Private = v.(int)
+	if v, ok := info["private"]; ok {
+		tinfo.IsPrivate = (v.(int64) == 1)
+	}
 
-		case "name":
-			tinfo.Name = v.(string)
+	if v, ok := info["name"]; ok {
+		tinfo.Name = v.(string)
+	}
 
-		}
+	if v, ok := info["length"]; ok {
+		tinfo.Length = v.(int64)
+	}
+
+	if v, ok := info["md5sum"]; ok {
+		tinfo.Md5sum = v.(string)
 	}
 
 	tinfo.Files = make([]*FileInfo, 0)
 
-	// handle multi file mode
-	v, ok := info["files"]
-	if ok {
+	// multi file torrent
+	if v, ok := info["files"]; ok {
+		tinfo.IsMultiFile = true
 		flist := v.([]interface{})
 		for _, f := range flist {
 			imap := f.(map[string]interface{})
@@ -127,7 +120,7 @@ func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) error {
 			for k, v := range imap {
 				switch k {
 				case "length":
-					fileInfo.Length = v.(int)
+					fileInfo.Length = v.(int64)
 				case "path":
 					plist := v.([]interface{})
 					elist := make([]string, 0)
@@ -141,25 +134,16 @@ func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) error {
 			}
 			tinfo.Files = append(tinfo.Files, fileInfo)
 		}
-		tinfo.IsMultiFile = true
-		return nil
 	}
 
 	// handle single file mode
-	fileInfo := &FileInfo{
-		Path: tinfo.Name,
+	if !tinfo.IsMultiFile {
+		tinfo.Files = append(tinfo.Files, &FileInfo{
+			Length: tinfo.Length,
+			Path:   tinfo.Name,
+			Md5sum: tinfo.Md5sum,
+		})
 	}
-	v, ok = info["length"]
-	if ok {
-		fileInfo.Length = v.(int)
-	}
-	v, ok = info["md5sum"]
-	if ok {
-		fileInfo.Md5sum = v.(string)
-	}
-
-	tinfo.Files = append(tinfo.Files, fileInfo)
-	return nil
 }
 
 // parse magnet link
@@ -189,7 +173,7 @@ func ParseMagnetLink(mlink string) (*MagnetInfo, error) {
 	minfo := &MagnetInfo{
 		ExactTopic:   xt,
 		DisplayName:  dn,
-		ExactLength:  xli,
+		ExactLength:  int64(xli),
 		InfoHash:     hbytes,
 		AnnounceList: tlist,
 	}

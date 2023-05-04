@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"time"
@@ -51,7 +52,7 @@ func StartHandshake(peerInfo *PeerInfo, infoHash []byte, clientId []byte) error 
 	if rh.Pstr != PROTOCOL {
 		return fmt.Errorf("invalid protocol string %s", rh.Pstr)
 	}
-	if !CompareBytes(rh.InfoHash[:], sh.InfoHash[:]) {
+	if !bytes.Equal(rh.InfoHash[:], sh.InfoHash[:]) {
 		return fmt.Errorf("invalid info hash, sent %x, recv %x", sh.InfoHash, rh.InfoHash)
 	}
 
@@ -62,7 +63,6 @@ func StartHandshake(peerInfo *PeerInfo, infoHash []byte, clientId []byte) error 
 	fmt.Println("successful handshake")
 	peerInfo.Conn = conn
 	peerInfo.PeerId = peerId
-	peerInfo.IsActive = true
 
 	return nil
 }
