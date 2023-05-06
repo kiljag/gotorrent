@@ -1,7 +1,5 @@
 package core
 
-import "net"
-
 // magnet link information
 type MagnetInfo struct {
 	ExactTopic   string
@@ -34,19 +32,13 @@ type TorrentInfo struct {
 	Files        []*FileInfo // list of files, works for both single and multi file structure
 
 	// custom fields
-	InfoHash        []byte // sha1 of info dictionary
-	IsMultiFile     bool   // if the torrent has multiple files
-	NumPieces       int64  // number of pieces in the torrent
-	LastPieceLength int64  // last piece length
-}
+	MetaInfo         []byte // metadata bytes
+	InfoHash         []byte // sha1 of info dictionary
+	IsMultiFile      bool   // if the torrent has multiple files
+	IsFromMagnetLink bool   // if the struct is created using magnet link
+	NumPieces        int64  // number of pieces in the torrent
+	LastPieceLength  int64  // last piece length
 
-// peer info
-type PeerInfo struct {
-	Ip     net.IP
-	Port   uint16
-	Key    uint64
-	Conn   net.Conn
-	PeerId []byte
 }
 
 // tracker Announce request
@@ -68,10 +60,10 @@ type AnnounceReq struct {
 
 // tracker Announce response
 type AnnounceRes struct {
-	Interval    int // The waiting time between requests
-	MinInterval int // (Optional) the minimum announce interval
-	Complete    int // number of peers with the entire file
-	Incomplete  int // number of non-seeder peers (leechers)
+	Interval    int64 // The waiting time between requests
+	MinInterval int64 // (Optional) the minimum announce interval
+	Complete    int64 // number of peers with the entire file
+	Incomplete  int64 // number of non-seeder peers (leechers)
 	TrackerId   string
 	Peers       []byte // concatenated list of <4-byte-ip, 2-byte-port>
 	PeersV6     []byte // ipv6 addresses
@@ -126,6 +118,12 @@ type MessagePort struct {
 	Port uint16
 }
 
+type MessageExtension struct {
+	EType   uint8 // extension type
+	Payload []byte
+}
+
+// custom message types
 type MessagePieceCompleted struct {
 	PieceIndex uint32
 }

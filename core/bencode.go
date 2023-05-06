@@ -104,7 +104,7 @@ func bEncodeDict(d map[string]interface{}) ([]byte, error) {
 		var err error
 
 		switch val := v.(type) {
-		case int, int32, int64:
+		case int, int8, int16, int32, int64:
 			num := reflect.ValueOf(val).Int()
 			vbytes = bEncodeInt(num)
 		case string:

@@ -61,6 +61,8 @@ func ParseTorrentFile(tpath string) (*TorrentInfo, error) {
 			if err != nil {
 				return nil, err
 			}
+			tinfo.MetaInfo = make([]byte, len(ibytes))
+			copy(tinfo.MetaInfo, ibytes)
 			tinfo.InfoHash = make([]byte, 20)
 			infoHash := sha1.Sum(ibytes)
 			copy(tinfo.InfoHash, infoHash[:])
@@ -147,7 +149,7 @@ func parseFileInfo(tinfo *TorrentInfo, info map[string]interface{}) {
 }
 
 // parse magnet link
-func ParseMagnetLink(mlink string) (*MagnetInfo, error) {
+func ParseMagnetLink(mlink string) (*TorrentInfo, error) {
 
 	mlink = strings.TrimSpace(mlink)
 	u, err := url.Parse(mlink)
@@ -178,5 +180,12 @@ func ParseMagnetLink(mlink string) (*MagnetInfo, error) {
 		AnnounceList: tlist,
 	}
 
-	return minfo, nil
+	// construct torrentinfo
+	tinfo := &TorrentInfo{
+		AnnounceList: minfo.AnnounceList,
+		InfoHash:     minfo.InfoHash,
+		Length:       minfo.ExactLength,
+	}
+
+	return tinfo, nil
 }

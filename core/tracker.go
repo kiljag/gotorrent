@@ -103,13 +103,13 @@ func (tr *Tracker) httpGetAnnounce(params *AnnounceReq) (*AnnounceRes, error) {
 	for k, v := range dmap {
 		switch k {
 		case "complete":
-			result.Complete = v.(int)
+			result.Complete = v.(int64)
 		case "incomplete":
-			result.Incomplete = v.(int)
+			result.Incomplete = v.(int64)
 		case "interval":
-			result.Interval = v.(int)
+			result.Interval = v.(int64)
 		case "min interval":
-			result.MinInterval = v.(int)
+			result.MinInterval = v.(int64)
 		case "peers":
 			vstr := v.(string)
 			result.Peers = []byte(vstr)

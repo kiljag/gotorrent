@@ -23,17 +23,21 @@ type Piece struct {
 
 // manages piece creation and writing to file
 type PieceManager struct {
-	sync.Mutex
-	torrentInfo *TorrentInfo
-	bitmap      *BitMap // bitmap of downloaded pieces
-	downloaded  int     // number of downloaded pieces
+	torrentInfo      *TorrentInfo
+	bitmap           *BitMap // bitmap of downloaded pieces
+	downloadedPieces int     // number of downloaded pieces
 
 	// pieces
+	piecelock    sync.Mutex
 	pieceCache   []*Piece       // cache to reduce make([]byte) calls
 	pieceMap     map[int]*Piece // pieces which are in progress
 	pieceChannel chan int       // to pass downloaded piece indices
 	dummy        *Piece         // dummy piece
 	doneSaving   chan bool      // pieces are saved
+
+	// stats
+	downloadedBytes int64
+	uploadedBytes   int64
 
 	// io
 	downloadDir string
@@ -42,18 +46,22 @@ type PieceManager struct {
 
 func NewPieceManager(torrentInfo *TorrentInfo) *PieceManager {
 	homeDir, _ := os.UserHomeDir()
-	return &PieceManager{
-		torrentInfo: torrentInfo,
+	dummy := &Piece{data: make([]byte, torrentInfo.Length)}
 
-		bitmap:       NewBitMap(int(torrentInfo.NumPieces)),
+	return &PieceManager{
+		torrentInfo:      torrentInfo,
+		bitmap:           NewBitMap(int(torrentInfo.NumPieces)),
+		downloadedPieces: 0,
+
 		pieceCache:   make([]*Piece, 0),
 		pieceMap:     make(map[int]*Piece, 0),
 		pieceChannel: make(chan int),
-		dummy: &Piece{
-			data: make([]byte, torrentInfo.PieceLength),
-		},
-		doneSaving:  make(chan bool),
-		downloaded:  0,
+		dummy:        dummy,
+		doneSaving:   make(chan bool),
+
+		downloadedBytes: 0,
+		uploadedBytes:   0,
+
 		downloadDir: filepath.Join(homeDir, "Downloads"),
 		writeFdMap:  make(map[string]*os.File),
 	}
@@ -70,8 +78,8 @@ func (pm *PieceManager) start() {
 // returns a struct representing a piece
 func (pm *PieceManager) getPiece(pi int) *Piece {
 
-	pm.Lock()
-	defer pm.Unlock()
+	pm.piecelock.Lock()
+	defer pm.piecelock.Unlock()
 
 	// return if the piece exists
 	if piece, ok := pm.pieceMap[pi]; ok {
@@ -141,9 +149,9 @@ func (pm *PieceManager) handleDownloadedPieces() {
 		// fmt.Println("saving piece ", pi)
 
 		// save piece
-		pm.Lock()
+		pm.piecelock.Lock()
 		piece := pm.pieceMap[pi]
-		pm.Unlock()
+		pm.piecelock.Unlock()
 
 		pieceBegin := pi * int(pm.torrentInfo.PieceLength)
 		pieceEnd := pieceBegin + piece.length
@@ -181,19 +189,19 @@ func (pm *PieceManager) handleDownloadedPieces() {
 		}
 
 		// add piece to cache
-		pm.downloaded++
-		pm.Lock()
+		pm.downloadedPieces++
+		pm.piecelock.Lock()
 		pm.pieceCache = append(pm.pieceCache, piece)
 		delete(pm.pieceMap, pi)
-		pm.Unlock()
+		pm.piecelock.Unlock()
 
-		if pm.downloaded == int(pm.torrentInfo.NumPieces) {
+		if pm.downloadedPieces == int(pm.torrentInfo.NumPieces) {
 			break
 		}
 	}
 
 	timeTaken := time.Since(startTime)
-	fmt.Printf("downloaded %d pieces, took %s\n", pm.downloaded, timeTaken)
+	fmt.Printf("downloaded %d pieces, took %s\n", pm.downloadedPieces, timeTaken)
 	// close all write fds
 	for _, fd := range pm.writeFdMap {
 		fd.Close()

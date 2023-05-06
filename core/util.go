@@ -3,8 +3,6 @@ package core
 import (
 	"crypto/rand"
 	"crypto/sha1"
-	"encoding/binary"
-	"fmt"
 	"net"
 )
 
@@ -16,14 +14,6 @@ func GeneratePeerId() []byte {
 	hb := sha1.Sum(buf)
 	copy(id[8:], hb[8:])
 	return id
-}
-
-func GeneratePeerKey(ip net.IP, port uint16) uint64 {
-	ipstr := fmt.Sprintf("%s:%d", ip, port)
-	kbytes := sha1.Sum([]byte(ipstr))
-	var key uint64
-	binary.BigEndian.PutUint64(kbytes[:8], key)
-	return key
 }
 
 func GetAddrInfo(url string) (string, error) {
