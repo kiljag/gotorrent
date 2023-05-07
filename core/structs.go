@@ -38,35 +38,6 @@ type TorrentInfo struct {
 	IsFromMagnetLink bool   // if the struct is created using magnet link
 	NumPieces        int64  // number of pieces in the torrent
 	LastPieceLength  int64  // last piece length
-
-}
-
-// tracker Announce request
-type AnnounceReq struct {
-	InfoHash   []byte // 20 bytes SHA1 hash
-	PeerId     []byte // 20 byte client generated ID
-	Port       int    // range 6881-6889
-	Uploaded   int    // total amount uploaded since 'started' event
-	Downloaded int    // total amount downloaded since 'started' event
-	Left       int    // the number of bytes that has to be downloaded
-	Compact    int    // 0 or 1
-	NoPeerId   int    // (Optional) tracker can omit peer id in peers
-	Event      string // 'started', 'completed', 'stopped'
-	Ip         string // (Optional)
-	Numwant    int    // (Optional) number of peers client would like to recieve, default is 50
-	Key        string // (Optional) additional identification
-	TrackerId  string // (Optional)
-}
-
-// tracker Announce response
-type AnnounceRes struct {
-	Interval    int64 // The waiting time between requests
-	MinInterval int64 // (Optional) the minimum announce interval
-	Complete    int64 // number of peers with the entire file
-	Incomplete  int64 // number of non-seeder peers (leechers)
-	TrackerId   string
-	Peers       []byte // concatenated list of <4-byte-ip, 2-byte-port>
-	PeersV6     []byte // ipv6 addresses
 }
 
 // peer hanshake response

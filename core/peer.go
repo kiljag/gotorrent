@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -77,12 +76,13 @@ func createMsgMap() map[uint8]string {
 
 // peer info
 type PeerInfo struct {
-	Ip       net.IP
-	Port     uint16
-	Key      uint64
-	Reserved uint64
+	Ip   net.IP
+	Port uint16
+	Key  string
+
 	Conn     net.Conn
 	PeerId   []byte
+	Reserved []byte
 }
 
 func (p *PeerInfo) SendHandshake(h *HandShakeParams) error {
@@ -122,7 +122,7 @@ func (p *PeerInfo) RecvHandshake() (*HandShakeParams, error) {
 
 // open a tcp connection with peer
 // send and verify handshake
-func PeerHandshake(ip net.IP, port uint16,
+func PeerHandshake(ip net.IP, port uint16, key string,
 	infoHash []byte, reserved []byte, clientId []byte) (*PeerInfo, error) {
 
 	addr := fmt.Sprintf("%s:%d", ip, port)
@@ -135,11 +135,12 @@ func PeerHandshake(ip net.IP, port uint16,
 		Ip:     ip,
 		Port:   port,
 		Conn:   conn,
-		Key:    0,
+		Key:    key,
 		PeerId: make([]byte, 20),
 	}
-	h := sha1.Sum([]byte(conn.RemoteAddr().String()))
-	peerInfo.Key = binary.BigEndian.Uint64(h[:])
+
+	// h := sha1.Sum([]byte(conn.RemoteAddr().String()))
+	// peerInfo.Key = binary.BigEndian.Uint64(h[:])
 
 	// send handshake
 	sh := &HandShakeParams{
@@ -166,7 +167,7 @@ func PeerHandshake(ip net.IP, port uint16,
 		return nil, fmt.Errorf("invalid info hash, sent %x, recv %x", sh.InfoHash, rh.InfoHash)
 	}
 	copy(peerInfo.PeerId, rh.PeerId)
-	peerInfo.Reserved = binary.BigEndian.Uint64(rh.Reserved)
+	peerInfo.Reserved = rh.Reserved
 	fmt.Printf("peerId   : %x\n", peerInfo.PeerId)
 	fmt.Printf("reserved : %x\n", rh.Reserved)
 
@@ -175,7 +176,6 @@ func PeerHandshake(ip net.IP, port uint16,
 
 type Peer struct {
 	conn         net.Conn
-	key          uint64 // key to uniquely identify peer
 	peerInfo     *PeerInfo
 	torrentInfo  *TorrentInfo
 	pieceManager *PieceManager
@@ -185,6 +185,11 @@ type Peer struct {
 	am_interested   bool // this client is intereted in peer
 	peer_choking    bool // peer is choking this client
 	peer_interested bool // peer is interested in this client
+
+	// extensions
+	supports_ltep       bool
+	supports_fast_peers bool
+	supports_dht        bool
 
 	bitmap *BitMap
 	extMap map[string]uint8 // extension id's local to this peer
@@ -214,7 +219,6 @@ func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceMa
 
 	p := &Peer{
 		conn:         peerInfo.Conn,
-		key:          peerInfo.Key,
 		peerInfo:     peerInfo,
 		torrentInfo:  torrentInfo,
 		pieceManager: pieceManager,
@@ -223,6 +227,10 @@ func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceMa
 		am_interested:   false,
 		peer_choking:    true,
 		peer_interested: false,
+
+		supports_ltep:       (peerInfo.Reserved[5]&0x10 > 1),
+		supports_fast_peers: (peerInfo.Reserved[7]&0x05 > 1),
+		supports_dht:        (peerInfo.Reserved[7]&0x01 > 1),
 
 		bitmap: NewBitMap(pieceManager.bitmap.length),
 		extMap: make(map[string]uint8),

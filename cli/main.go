@@ -2,59 +2,15 @@ package main
 
 import (
 	gtc "core"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
 )
 
-func TestTracker() {
-
-	announce := "http://localhost:9000/announce"
-	// infoHash, _ := hex.DecodeString("27994de22087154c8245c68a12297a3079e6b67d")
-	infoHash, _ := hex.DecodeString("3cdeeb871dc9a2c0aaf646b93afe1bd7e16b46c5")
-	filelen := 524288
-
-	clientId := gtc.GeneratePeerId()
-	port := 6581
-
-	req := &gtc.AnnounceReq{
-		InfoHash:   infoHash,
-		PeerId:     clientId,
-		Port:       port,
-		Uploaded:   0,
-		Downloaded: 0,
-		Left:       filelen,
-		Compact:    1,
-		Event:      gtc.EVENT_STARTED,
-	}
-
-	tracker := gtc.NewTracker(announce)
-	res, err := tracker.GetAnnounce(req)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("interval : ", res.Interval)
-	fmt.Println("min interval : ", res.MinInterval)
-	fmt.Println("complete : ", res.Complete)
-	fmt.Println("incomplete : ", res.Incomplete)
-
-	numPeers := len(res.Peers) / 6
-	fmt.Println("numPeers : ", numPeers)
-
-	for i := 0; i < numPeers; i++ {
-		b := res.Peers[i*6 : i*6+6]
-		ip := net.IP(b[:4])
-		port := binary.BigEndian.Uint16(b[4:])
-		fmt.Printf("peer : %s:%d\n", ip, port)
-	}
-}
-
 func TestTorrent() {
 
-	// torrentInfo, err := gtc.ParseTorrentFile("../res/sintel_trailer-480p.torrent")
-	torrentInfo, err := gtc.ParseTorrentFile("../res/sample-trailers.torrent")
+	torrentInfo, err := gtc.ParseTorrentFile("../res/sintel_trailer-480p.torrent")
+	// torrentInfo, err := gtc.ParseTorrentFile("../res/sample-trailers.torrent")
 
 	// fmt.Printf("%+v\n", torrentInfo)
 	// fmt.Printf("%+v\n", torrentInfo.Files)
@@ -86,20 +42,61 @@ func TestPeer() {
 	reserved := make([]byte, 8)
 	reserved[5] = reserved[5] & 0x10
 
-	peerInfo, err := gtc.PeerHandshake(ip, port, tinfo.InfoHash, reserved, clientId)
+	peerInfo, err := gtc.PeerHandshake(ip, port, "123", tinfo.InfoHash, reserved, clientId)
 	if err != nil {
 		panic(err)
 	}
 
 	fmt.Printf("reserved : %x\n", peerInfo.Reserved)
-	fmt.Printf("peer key : %d\n", peerInfo.Key)
+	fmt.Printf("peer key : %s\n", peerInfo.Key)
 
 	// send messages
+}
 
+func TestTracker() {
+
+	clientId := gtc.GeneratePeerId()
+	clientPort := uint16(6541)
+
+	// announce := "http://localhost:9000/announce"
+	// tinfo, err := gtc.ParseTorrentFile("../res/sample-trailers.torrent")
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	announce := "http://open.acgnxtracker.com:80/announce"
+	// announce := "udp://tracker.torrent.eu.org:451/announce"
+	infoHash, _ := hex.DecodeString("c5ae0f24349e6006002bb46fd9c50a36d6a0fb3b")
+	tinfo := &gtc.TorrentInfo{
+		InfoHash: infoHash,
+		Length:   383147546,
+	}
+
+	pm := gtc.NewPieceManager(tinfo)
+	tracker, err := gtc.NewTracker(announce, clientId, clientPort, tinfo, pm)
+	if err != nil {
+		panic(err)
+	}
+	// fmt.Printf("tracker : %+v\n", tracker)
+
+	// test connect
+	trackerChannel := make(chan gtc.PeerV4List)
+	tracker.Start(trackerChannel)
+
+	for {
+		v, ok := <-trackerChannel
+		if !ok {
+			break
+		}
+		for _, pv := range v {
+			fmt.Printf("peer : %s:%d\n", pv.Ip, pv.Port)
+		}
+	}
 }
 
 func main() {
-	// TestTracker()
+
 	// TestPeer()
-	TestTorrent()
+	// TestTorrent()
+	TestTracker()
 }

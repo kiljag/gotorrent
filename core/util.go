@@ -3,6 +3,7 @@ package core
 import (
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"net"
 )
 
@@ -14,6 +15,12 @@ func GeneratePeerId() []byte {
 	hb := sha1.Sum(buf)
 	copy(id[8:], hb[8:])
 	return id
+}
+
+func GenerateTransactionId() uint32 {
+	var id [4]byte
+	rand.Read(id[:])
+	return binary.BigEndian.Uint32(id[:])
 }
 
 func GetAddrInfo(url string) (string, error) {

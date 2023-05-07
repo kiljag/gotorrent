@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"time"
@@ -64,8 +65,9 @@ func NewTorrent(torrentInfo *TorrentInfo) *Torrent {
 	}
 
 	// extension protocol
-	t.clientReserved[5] |= 0x10
-	// t.clientReserved[7] |= 0x05
+	t.clientReserved[5] |= 0x10 // ltep extension
+	t.clientReserved[7] |= 0x05 // fast peers extension
+	t.clientReserved[8] |= 0x01 // dht
 
 	return t
 }
@@ -98,7 +100,10 @@ func (t *Torrent) start() {
 	pbytes := []byte{127, 0, 0, 1, 247, 222}
 	ip := net.IP(pbytes[:4])
 	port := binary.BigEndian.Uint16(pbytes[4:6])
-	peerInfo, err := PeerHandshake(ip, port,
+	h := sha1.Sum([]byte(fmt.Sprintf("%s:%d", ip, port)))
+	key := hex.EncodeToString(h[:])
+
+	peerInfo, err := PeerHandshake(ip, port, key,
 		t.torrentInfo.InfoHash, t.clientReserved, t.clientId)
 	if err != nil {
 		panic(err)
