@@ -1,10 +1,10 @@
 package core
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -21,15 +21,15 @@ const (
 	MESSAGE_CANCEL         = 0x08
 	MESSAGE_PORT           = 0x09
 
-	// fast extensions
+	// extension protocol
+	MESSAGE_LTEP = 0x14
+
+	// fast peers protocol
 	MESSAGE_SUGGEST        = 0x0D
 	MESSAGE_HAVE_ALL       = 0x0E
 	MESSAGE_HAVE_NONE      = 0x0F
 	MESSAGE_REJECT_REQUEST = 0x10
 	MESSAGE_ALLOWED_FAST   = 0x11
-
-	// ltep extension
-	MESSAGE_EXTENSION_PROTOCOL = 0x14
 
 	// hash transfer protocol
 	MESSAGE_HASH_REQUEST = 0x15
@@ -49,150 +49,20 @@ const (
 	MAX_BLOCK_REQUESTS = 10
 )
 
-func createMsgMap() map[uint8]string {
-	msgIdMap := make(map[uint8]string)
-	msgIdMap[MESSAGE_CHOKE] = "choke"
-	msgIdMap[MESSAGE_UNCHOKE] = "unchoke"
-	msgIdMap[MESSAGE_INTERESTED] = "interested"
-	msgIdMap[MESSAGE_NOT_INTERESTED] = "not+interested"
-	msgIdMap[MESSAGE_HAVE] = "have"
-	msgIdMap[MESSAGE_BITFIELD] = "bitfield"
-	msgIdMap[MESSAGE_REQUEST] = "request"
-	msgIdMap[MESSAGE_PIECE_BLOCK] = "piece+block"
-	msgIdMap[MESSAGE_CANCEL] = "cancel"
-	msgIdMap[MESSAGE_PORT] = "port"
-	msgIdMap[MESSAGE_KEEPALIVE] = "keepalive"
-	msgIdMap[MESSAGE_SUGGEST] = "suggest"
-	msgIdMap[MESSAGE_HAVE_ALL] = "have+all"
-	msgIdMap[MESSAGE_HAVE_NONE] = "have+none"
-	msgIdMap[MESSAGE_REJECT_REQUEST] = "reject+request"
-	msgIdMap[MESSAGE_ALLOWED_FAST] = "allowed+fast"
-	msgIdMap[MESSAGE_EXTENSION_PROTOCOL] = "extension+protocol"
-	msgIdMap[MESSAGE_HASH_REQUEST] = "hash+request"
-	msgIdMap[MESSAGE_HASHES] = "hashes"
-	msgIdMap[MESSAGE_HASH_REJECT] = "hash+reject"
-	return msgIdMap
-}
-
-// peer info
-type PeerInfo struct {
-	Ip   net.IP
-	Port uint16
-	Key  string
-
-	Conn     net.Conn
-	PeerId   []byte
-	Reserved []byte
-}
-
-func (p *PeerInfo) SendHandshake(h *HandShakeParams) error {
-	payload := make([]byte, 0)
-	payload = append(payload, h.PStrLen)
-	payload = append(payload, []byte(h.Pstr)...)
-	payload = append(payload, h.Reserved[:]...)
-	payload = append(payload, h.InfoHash[:]...)
-	payload = append(payload, h.PeerId[:]...)
-	err := SendNBytes(p.Conn, payload)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// read handshake response
-func (p *PeerInfo) RecvHandshake() (*HandShakeParams, error) {
-	buf := make([]byte, 68)
-	err := RecvNBytes(p.Conn, buf)
-	if err != nil {
-		fmt.Println()
-		return nil, err
-	}
-	h := &HandShakeParams{
-		Reserved: make([]byte, 8),
-		InfoHash: make([]byte, 20),
-		PeerId:   make([]byte, 20),
-	}
-	h.PStrLen = buf[0]
-	h.Pstr = string(buf[1:20])
-	copy(h.Reserved[:], buf[20:28])
-	copy(h.InfoHash[:], buf[28:48])
-	copy(h.PeerId, buf[48:68])
-	return h, nil
-}
-
-// open a tcp connection with peer
-// send and verify handshake
-func PeerHandshake(ip net.IP, port uint16, key string,
-	infoHash []byte, reserved []byte, clientId []byte) (*PeerInfo, error) {
-
-	addr := fmt.Sprintf("%s:%d", ip, port)
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	// fmt.Printf("connected to peer %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
-	peerInfo := &PeerInfo{
-		Ip:     ip,
-		Port:   port,
-		Conn:   conn,
-		Key:    key,
-		PeerId: make([]byte, 20),
-	}
-
-	// h := sha1.Sum([]byte(conn.RemoteAddr().String()))
-	// peerInfo.Key = binary.BigEndian.Uint64(h[:])
-
-	// send handshake
-	sh := &HandShakeParams{
-		PStrLen:  uint8(len(PROTOCOL)),
-		Pstr:     PROTOCOL,
-		Reserved: reserved,
-		InfoHash: infoHash,
-		PeerId:   clientId,
-	}
-	err = peerInfo.SendHandshake(sh)
-	if err != nil {
-		return nil, fmt.Errorf("error in sending handshake %s", err)
-	}
-
-	// verify handshake
-	rh, err := peerInfo.RecvHandshake()
-	if err != nil {
-		return nil, err
-	}
-	if rh.Pstr != PROTOCOL {
-		return nil, fmt.Errorf("invalid protocol string %s", rh.Pstr)
-	}
-	if !bytes.Equal(rh.InfoHash[:], sh.InfoHash[:]) {
-		return nil, fmt.Errorf("invalid info hash, sent %x, recv %x", sh.InfoHash, rh.InfoHash)
-	}
-	copy(peerInfo.PeerId, rh.PeerId)
-	peerInfo.Reserved = rh.Reserved
-	fmt.Printf("peerId   : %x\n", peerInfo.PeerId)
-	fmt.Printf("reserved : %x\n", rh.Reserved)
-
-	return peerInfo, nil
-}
-
 type Peer struct {
+	sync.Mutex
 	conn         net.Conn
+	key          string
 	peerInfo     *PeerInfo
 	torrentInfo  *TorrentInfo
 	pieceManager *PieceManager
+	bitmap       *BitMap
 
 	// peer state
 	am_choking      bool // this client is choking the peer
 	am_interested   bool // this client is intereted in peer
 	peer_choking    bool // peer is choking this client
 	peer_interested bool // peer is interested in this client
-
-	// extensions
-	supports_ltep       bool
-	supports_fast_peers bool
-	supports_dht        bool
-
-	bitmap *BitMap
-	extMap map[string]uint8 // extension id's local to this peer
 
 	// peer stats
 	keepalive  int64
@@ -203,37 +73,35 @@ type Peer struct {
 	pieceQueue []int        // list of piece indices
 	pieceMap   map[int]bool // piece index -> presence in Q
 
-	// external channels
-	peerChannel chan *MessageParams
-
-	// internal channels
+	peerChannel      chan *PeerMessage       // to send peer messages to torrent manager
 	blocksFromPeer   chan *MessagePieceBlock // channel to receive blocks from peer
 	requestsFromPeer chan *MessageRequest    // channel to receive block requests from peer
-	toPeer           chan *MessageParams     // messages to peer
+	toPeer           chan *MessageParams     // to send messages to peer
 
 	// utlity maps
 	msgIdMap map[uint8]string
+
+	//extension
+	extensionMap      map[string]uint8            // extension id's local to this peer
+	extensionIdMap    map[uint8]string            // reverse mapping of extensions
+	extensionProps    map[string]interface{}      // peer properties from handshake
+	extensionChannels map[string]chan interface{} // message type to interface
 }
 
 func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceManager) *Peer {
 
 	p := &Peer{
 		conn:         peerInfo.Conn,
+		key:          peerInfo.Key,
 		peerInfo:     peerInfo,
 		torrentInfo:  torrentInfo,
 		pieceManager: pieceManager,
+		bitmap:       NewBitMap(pieceManager.bitmap.length),
 
 		am_choking:      true,
 		am_interested:   false,
 		peer_choking:    true,
 		peer_interested: false,
-
-		supports_ltep:       (peerInfo.Reserved[5]&0x10 > 1),
-		supports_fast_peers: (peerInfo.Reserved[7]&0x05 > 1),
-		supports_dht:        (peerInfo.Reserved[7]&0x01 > 1),
-
-		bitmap: NewBitMap(pieceManager.bitmap.length),
-		extMap: make(map[string]uint8),
 
 		keepalive:  0,
 		downloaded: 0,
@@ -248,18 +116,29 @@ func NewPeer(peerInfo *PeerInfo, torrentInfo *TorrentInfo, pieceManager *PieceMa
 		requestsFromPeer: make(chan *MessageRequest),
 		toPeer:           make(chan *MessageParams),
 
+		extensionMap:      make(map[string]uint8),
+		extensionIdMap:    make(map[uint8]string),
+		extensionProps:    make(map[string]interface{}),
+		extensionChannels: make(map[string]chan interface{}),
+
 		msgIdMap: createMsgMap(),
 	}
 	return p
 }
 
-func (p *Peer) Start(peerChannel chan *MessageParams) {
+func (p *Peer) Start(peerChannel chan *PeerMessage) {
 	p.peerChannel = peerChannel
 	go p.start()
 }
 
 // peer state machine
 func (p *Peer) start() {
+
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Println(p.key, "panic", err)
+		}
+	}()
 
 	defer p.conn.Close()
 	go p.handleRequestsToPeer()
@@ -268,27 +147,30 @@ func (p *Peer) start() {
 	go func() {
 		// send extension handshake
 		m := make(map[string]interface{})
-		m["ut_metadata"] = 1
+		m[EXT_PEX] = 1
+		m[EXT_UPLOAD_ONLY] = 2
+		m[EXT_HOLEPUNCH] = 4
 
 		payload := make(map[string]interface{})
 		payload["m"] = m
-		payload["v"] = "gotorrent 1.0"
-		payload["reqq"] = 2000
-		payload["metadata_size"] = 310
 
-		enc, err := BEncode(payload)
+		payload["reqq"] = 2000
+		payload["upload_only"] = 1
+		payload["v"] = "GoTorrent/1.0.0"
+		payload["yourip"] = string([]byte{127, 0, 0, 1})
+
+		_, err := BEncode(payload)
 		if err != nil {
 			panic(err)
 		}
 
-		fmt.Println("payload : ", string(enc))
-		p.toPeer <- &MessageParams{
-			Type: MESSAGE_EXTENSION_PROTOCOL,
-			Data: &MessageExtension{
-				EType:   0x00,
-				Payload: enc,
-			},
-		}
+		// p.toPeer <- &MessageParams{
+		// 	Type: MESSAGE_LTEP,
+		// 	Data: &MessageExtension{
+		// 		EType:   0x00,
+		// 		Payload: enc,
+		// 	},
+		// }
 
 		// send bitfield
 		p.toPeer <- &MessageParams{
@@ -316,11 +198,30 @@ func (p *Peer) start() {
 	for {
 		msg, err := p.recvMessage()
 		if err != nil {
-			fmt.Println("peer error : ", err)
+			fmt.Println(p.key, err)
 			break
 		}
 		if msg != nil {
+			fmt.Println(p.key, "from peer <= ", p.msgIdMap[msg.Type], msg.Type)
 			switch msg.Type {
+
+			case MESSAGE_CHOKE:
+				p.peer_choking = true
+			case MESSAGE_UNCHOKE:
+				p.peer_choking = false
+			case MESSAGE_INTERESTED:
+				p.peer_interested = true
+			case MESSAGE_NOT_INTERESTED:
+				p.peer_interested = false
+
+			case MESSAGE_HAVE:
+				v := msg.Data.(*MessageHave)
+				p.bitmap.SetBit(int(v.PieceIndex))
+
+			case MESSAGE_BITFIELD:
+				v := msg.Data.(*MessageBitField)
+				p.bitmap.bitmap = v.BitField
+
 			case MESSAGE_PIECE_BLOCK:
 				v := msg.Data.(*MessagePieceBlock)
 				p.blocksFromPeer <- v
@@ -329,15 +230,32 @@ func (p *Peer) start() {
 				v := msg.Data.(*MessageRequest)
 				p.requestsFromPeer <- v
 
-			case MESSAGE_HAVE:
-				p.peerChannel <- msg
+			case MESSAGE_LTEP:
+				ext := msg.Data.(*MessageExtension)
+				p.handleExtensionMessage(ext)
 			}
 		}
 
 		// if there are messages to be sent to peer
 		select {
 		case v := <-p.toPeer:
+			fmt.Println(p.key, " toPeer => ", p.msgIdMap[v.Type], v.Type)
 			p.sendMessage(v)
+
+			switch v.Type {
+			case MESSAGE_CHOKE:
+				p.am_choking = true
+
+			case MESSAGE_UNCHOKE:
+				p.am_choking = false
+
+			case MESSAGE_INTERESTED:
+				p.am_interested = true
+
+			case MESSAGE_NOT_INTERESTED:
+				p.am_interested = false
+			}
+
 		default:
 		}
 	}
@@ -359,7 +277,6 @@ func (p *Peer) recvMessage() (*MessageParams, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading mlen")
 		}
-		n = 4
 	}
 
 	mlen := binary.BigEndian.Uint32(buf[:4])
@@ -390,21 +307,7 @@ func (p *Peer) recvMessage() (*MessageParams, error) {
 		Data:   nil,
 	}
 
-	// fmt.Println("from peer <= ", p.msgIdMap[mtype])
-
-	// handle bitfield message
-	if mtype == MESSAGE_BITFIELD {
-		if int(mlen-1) != len(p.bitmap.Bytes()) {
-			return nil, fmt.Errorf("invalid number of bitmap bytes")
-		}
-		err := RecvNBytes(p.conn, p.bitmap.Bytes())
-		if err != nil {
-			return nil, fmt.Errorf("error reading bitfield")
-		}
-
-		message.Data = &MessageBitField{
-			BitField: p.bitmap.Bytes(),
-		}
+	if mlen == 1 {
 		return message, nil
 	}
 
@@ -443,27 +346,19 @@ func (p *Peer) recvMessage() (*MessageParams, error) {
 	payload := make([]byte, mlen-1)
 	err = RecvNBytes(p.conn, payload)
 	if err != nil {
-		return nil, fmt.Errorf("error reading message payload")
+		return nil, fmt.Errorf("error reading message payload %s", err)
 	}
 
 	switch mtype {
-	case MESSAGE_CHOKE:
-		p.peer_choking = true
 
-	case MESSAGE_UNCHOKE:
-		p.peer_choking = false
-
-	case MESSAGE_INTERESTED:
-		p.peer_interested = true
-
-	case MESSAGE_NOT_INTERESTED:
-		p.peer_interested = false
+	case MESSAGE_BITFIELD:
+		message.Data = &MessageBitField{
+			BitField: payload,
+		}
 
 	case MESSAGE_HAVE:
-		pi := binary.BigEndian.Uint32(payload[0:4])
-		p.bitmap.SetBit(int(pi))
 		message.Data = &MessageHave{
-			PieceIndex: pi,
+			PieceIndex: binary.BigEndian.Uint32(payload[0:4]),
 		}
 
 	case MESSAGE_REQUEST:
@@ -485,60 +380,20 @@ func (p *Peer) recvMessage() (*MessageParams, error) {
 			Port: binary.BigEndian.Uint16(payload[:2]),
 		}
 
-	case MESSAGE_EXTENSION_PROTOCOL:
-		mdata := &MessageExtension{
+	case MESSAGE_LTEP:
+		message.Data = &MessageExtension{
 			EType:   payload[0],
 			Payload: payload[1:],
 		}
-		p.parseExtensionMessage(mdata)
-		message.Data = mdata
 
 	default:
-		fmt.Println("unrecognized message type ", message.Type)
+		fmt.Println(p.key, "unrecognized mtype ", message.Type)
+		message.Data = &MessageDefault{
+			Payload: payload,
+		}
 	}
 
 	return message, nil
-}
-
-func (p *Peer) parseExtensionMessage(msg *MessageExtension) {
-
-	dec, err := BDecode(msg.Payload)
-	if err != nil {
-		panic(err)
-	}
-	payload := dec.(map[string]interface{})
-
-	switch msg.EType {
-	case 0x00:
-
-		if v, ok := payload["m"]; ok {
-			m := v.(map[string]interface{})
-			for k, v := range m {
-				id := v.(int64)
-				fmt.Println(k, v)
-				p.extMap[k] = uint8(id)
-			}
-			// fmt.Println()
-		}
-
-		// if v, ok := payload["complete_ago"]; ok {
-		// 	val := v.(int64)
-		// 	fmt.Println("complete_ago : ", val)
-		// }
-
-		// if v, ok := payload["reqq"]; ok {
-		// 	val := v.(int64)
-		// 	fmt.Println("reqq : ", val)
-		// }
-
-		// if v, ok := payload["upload_only"]; ok {
-		// 	val := v.(int64)
-		// 	fmt.Println("upload_only : ", val)
-		// }
-
-	default:
-		fmt.Printf("unrecognised extension %x\n", msg.EType)
-	}
 }
 
 // send message to peer, update relevant fields accordingly
@@ -557,18 +412,6 @@ func (p *Peer) sendMessage(message *MessageParams) error {
 	data := make([]byte, 0)   // for bitfield and piece requests
 
 	switch message.Type {
-
-	case MESSAGE_CHOKE:
-		p.am_choking = true
-
-	case MESSAGE_UNCHOKE:
-		p.am_choking = false
-
-	case MESSAGE_INTERESTED:
-		p.am_interested = true
-
-	case MESSAGE_NOT_INTERESTED:
-		p.am_interested = false
 
 	case MESSAGE_HAVE:
 		v := message.Data.(*MessageHave)
@@ -610,14 +453,12 @@ func (p *Peer) sendMessage(message *MessageParams) error {
 		binary.BigEndian.PutUint16(h[0:4], v.Port)
 		payload = append(payload, h...)
 
-	case MESSAGE_EXTENSION_PROTOCOL:
+	case MESSAGE_LTEP:
 		v := message.Data.(*MessageExtension)
 		payload = append(payload, v.EType)
 		payload = append(payload, v.Payload...)
+		// fmt.Println(p.key, "payload : ", len(payload))
 
-	default:
-		fmt.Println("unrecognized message : ", message.Type)
-		return nil
 	}
 
 	// update message length
@@ -655,11 +496,6 @@ func (p *Peer) ContainsPiece(pi int) bool {
 	return p.bitmap.IsSet(pi)
 }
 
-// get metadata from the peer
-func (p *Peer) GetMetadata() []byte {
-	return nil
-}
-
 // Goroutine : handle piece block requests from peer
 func (p *Peer) handleRequestsFromPeer() {
 	for {
@@ -685,18 +521,14 @@ func (p *Peer) handleRequestsToPeer() {
 		err := p.getPiece(pi)
 		if err != nil {
 			fmt.Printf("error downloading piece %d : %s\n", pi, err)
-			p.peerChannel <- &MessageParams{
-				Type: MESSAGE_PIECE_CANCELLED,
-				Data: &MessagePieceCancelled{
-					PieceIndex: uint32(pi),
-				},
+			p.peerChannel <- &PeerMessage{
+				Type: PEER_PIECE_FAILED,
+				Data: pi,
 			}
 		} else {
-			p.peerChannel <- &MessageParams{
-				Type: MESSAGE_PIECE_COMPLETED,
-				Data: &MessagePieceCompleted{
-					PieceIndex: uint32(pi),
-				},
+			p.peerChannel <- &PeerMessage{
+				Type: PEER_PIECE_DONE,
+				Data: pi,
 			}
 		}
 		// increment offset

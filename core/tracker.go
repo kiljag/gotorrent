@@ -24,89 +24,13 @@ const (
 	ACTION_ANNOUNCE = 1
 	ACTION_SCRAPE   = 2
 	ACTION_ERROR    = 3
+
+	TMSG_PEER_LIST = 0
 )
-
-type PeerV4 struct {
-	Ip   net.IP
-	Port uint16
-}
-
-type PeerV6 struct {
-	Ip   net.IP
-	Port uint16
-}
-
-type PeerV4List []*PeerV4
-type PeerV6List []*PeerV6
-
-// http structs
-type AnnounceReq struct {
-	InfoHash   [20]byte // 20 bytes SHA1 hash
-	PeerId     [20]byte // 20 byte client generated ID
-	Port       uint16   // range 6881-6889
-	Uploaded   int64    // total amount uploaded since 'started' event
-	Downloaded int64    // total amount downloaded since 'started' event
-	Left       int64    // the number of bytes that has to be downloaded
-	Compact    int      // 0 or 1
-	NoPeerId   int      // (Optional) tracker can omit peer id in peers
-	Event      string   // 'started', 'completed', 'stopped'
-	Ip         string   // (Optional)
-	Numwant    int      // (Optional) number of peers client would like to recieve, default is 50
-	Key        string   // (Optional) additional identification
-	TrackerId  string   // (Optional)
-}
-
-type AnnounceRes struct {
-	Interval    int64 // The waiting time between requests
-	MinInterval int64 // (Optional) the minimum announce interval
-	Complete    int64 // number of peers with the entire file
-	Incomplete  int64 // number of non-seeder peers (leechers)
-	TrackerId   string
-	ExternalIP  [4]byte
-	Peers       PeerV4List //
-	PeersV6     PeerV6List // ipv6 addresses
-}
-
-// udp structs
-type ConnectReqUDP struct {
-	ProtocolID    uint64 // 0x41727101980, magic constant
-	Action        uint32 // 0 for connect
-	TransactionId uint32
-}
-
-type ConnectResUDP struct {
-	Action        uint32 // 0 for connect
-	TransactionId uint32
-	ConnectionId  uint64
-}
-
-type AnnounceReqUDP struct {
-	ConnectionId  uint64
-	Action        uint32 // 1 for announce
-	TransactionId uint32
-	InfoHash      [20]byte
-	PeerId        [20]byte
-	Downloaded    uint64
-	Left          uint64
-	Uploaded      uint64
-	Event         uint32 // 0: none; 1: Completed, 2: started, 3: stopped
-	IpAddr        uint32 // 0 default
-	Key           uint32
-	NumWant       int32 // -1 default
-	Port          uint16
-}
-
-type AnnounceResUDP struct {
-	Action        uint32
-	TransactionId uint32
-	Interval      uint32
-	Leechers      uint32
-	Seeders       uint32
-	Peers         PeerV4List
-}
 
 // tracker struct
 type Tracker struct {
+	key      string
 	announce string
 	scheme   string
 	hostname string
@@ -117,8 +41,7 @@ type Tracker struct {
 	clientId       []byte
 	clientPort     uint16
 	tinfo          *TorrentInfo
-	pm             *PieceManager
-	trackerChannel (chan PeerV4List)
+	trackerChannel (chan *TrackerMessage)
 
 	// tracker response
 	seeders      int64
@@ -131,50 +54,66 @@ type Tracker struct {
 	connectionAt int64
 }
 
-func NewTracker(announce string, clientId []byte, clientPort uint16,
-	tinfo *TorrentInfo, pm *PieceManager) (*Tracker, error) {
+func NewTracker(announce string, clientId []byte, clientPort uint16, tinfo *TorrentInfo) *Tracker {
 
-	fmt.Println("announce : ", announce)
 	u, err := url.Parse(announce)
 	if err != nil {
-		return nil, err
+		fmt.Println(announce, err)
 	}
 
+	key := fmt.Sprintf("(t)%s://%s", u.Scheme, u.Host)
 	schemes := "udp::http::https"
 	if !strings.Contains(schemes, u.Scheme) {
-		return nil, fmt.Errorf("unsupported tracker protocol: %s", u.Scheme)
-	}
-
-	// get ip
-	iplist, err := net.LookupIP(u.Hostname())
-	if err != nil {
-		return nil, fmt.Errorf("lookupIP error : %s", u.Hostname())
+		fmt.Println(key, "unsupported tracker protocol")
 	}
 
 	t := &Tracker{
+		key:        key,
 		announce:   announce,
 		scheme:     u.Scheme,
 		hostname:   u.Hostname(),
-		ip:         iplist[0],
 		port:       u.Port(),
 		tinfo:      tinfo,
-		pm:         pm,
 		clientId:   clientId,
 		clientPort: clientPort,
 		event:      "started",
 
 		connectionAt: 0,
 	}
-	return t, nil
+
+	if u.Scheme == "udp" {
+		// get ip
+		iplist, err := net.LookupIP(u.Hostname())
+		if err != nil {
+			fmt.Println(t.key, "lookupIP error")
+		}
+		for _, ip := range iplist {
+			if len(ip) == 4 {
+				t.ip = ip
+				break
+			}
+		}
+	}
+	return t
 }
 
 // send
-func (t *Tracker) Start(trackerChannel chan PeerV4List) {
+func (t *Tracker) Start(trackerChannel chan *TrackerMessage) {
 	t.trackerChannel = trackerChannel
+
+	if t.scheme == "udp" && t.ip == nil {
+		return
+	}
 	go t.start()
 }
 
 func (t *Tracker) start() {
+
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Println(t.key, "panic ", err)
+		}
+	}()
 
 	for {
 		event := 0
@@ -199,7 +138,10 @@ func (t *Tracker) start() {
 			t.trackerId = res.TrackerId
 			copy(t.externalIp[:], res.ExternalIP[:])
 
-			t.trackerChannel <- res.Peers
+			t.trackerChannel <- &TrackerMessage{
+				Key:  t.announce,
+				Data: res.Peers,
+			}
 
 		case "udp":
 
@@ -213,7 +155,11 @@ func (t *Tracker) start() {
 			t.leechers = int64(res.Leechers)
 			t.interval = int64(res.Interval)
 
-			t.trackerChannel <- res.Peers
+			t.trackerChannel <- &TrackerMessage{
+				Key:  t.key,
+				Type: TMSG_PEER_LIST,
+				Data: res.Peers,
+			}
 		}
 
 		// wait
@@ -228,9 +174,9 @@ func (t *Tracker) httpAnnounce() (*AnnounceRes, error) {
 
 	req := &AnnounceReq{
 		Port:       t.clientPort,
-		Uploaded:   t.pm.uploadedBytes,
-		Downloaded: t.pm.downloadedBytes,
-		Left:       t.tinfo.Length - t.pm.uploadedBytes,
+		Uploaded:   0,
+		Downloaded: 0,
+		Left:       t.tinfo.Length,
 		Compact:    1,
 		Event:      t.event,
 	}
@@ -282,9 +228,9 @@ func (t *Tracker) udpAnnounce(event int) (*AnnounceResUDP, error) {
 		ConnectionId:  t.connectionId,
 		Action:        ACTION_ANNOUNCE,
 		TransactionId: GenerateTransactionId(),
-		Downloaded:    uint64(t.pm.downloadedBytes),
-		Left:          uint64(t.tinfo.Length - t.pm.downloadedBytes),
-		Uploaded:      uint64(t.pm.uploadedBytes),
+		Downloaded:    uint64(0),
+		Left:          uint64(t.tinfo.Length),
+		Uploaded:      uint64(0),
 		Event:         uint32(event),
 		IpAddr:        0,
 		Key:           0,
@@ -414,12 +360,11 @@ func (t *Tracker) UDPAnnounce(req *AnnounceReqUDP) (*AnnounceResUDP, error) {
 	if len(pbytes)%6 != 0 {
 		return nil, fmt.Errorf("invalid announce udp response")
 	}
-	res.Peers = make([]*PeerV4, 0)
+	res.Peers = make([]*PeerInfo, 0)
 	for i := 0; i < len(pbytes); i += 6 {
-		res.Peers = append(res.Peers, &PeerV4{
-			Ip:   net.IP(pbytes[i : i+4]),
-			Port: binary.BigEndian.Uint16(pbytes[i+4 : i+6]),
-		})
+		ip := net.IP(pbytes[i : i+4])
+		port := binary.BigEndian.Uint16(pbytes[i+4 : i+6])
+		res.Peers = append(res.Peers, NewPeerInfo(ip, port))
 	}
 
 	return res, nil
@@ -501,12 +446,11 @@ func (t *Tracker) HTTPAnnounce(req *AnnounceReq) (*AnnounceRes, error) {
 	}
 	if v, ok := dmap["peers"]; ok {
 		pbytes := []byte(v.(string))
-		res.Peers = make([]*PeerV4, 0)
+		res.Peers = make([]*PeerInfo, 0)
 		for i := 0; i < len(pbytes); i += 6 {
-			res.Peers = append(res.Peers, &PeerV4{
-				Ip:   net.IP(pbytes[i : i+4]),
-				Port: binary.BigEndian.Uint16(pbytes[i+4 : i+6]),
-			})
+			ip := net.IP(pbytes[i : i+4])
+			port := binary.BigEndian.Uint16(pbytes[i+4 : i+6])
+			res.Peers = append(res.Peers, NewPeerInfo(ip, port))
 		}
 	}
 	if _, ok := dmap["peers_v6"]; ok {

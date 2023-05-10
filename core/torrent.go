@@ -3,80 +3,78 @@ package core
 import (
 	"bytes"
 	"crypto/sha1"
-	"encoding/binary"
-	"encoding/hex"
 	"fmt"
-	"net"
+	"sync"
 	"time"
 )
 
 const (
 	PROTOCOL = "BitTorrent protocol"
+
+	// expected peer messages
+	PEER_PIECE_DONE   = 0
+	PEER_PIECE_FAILED = 1
+	PEER_META_INFO    = 2
+	PEER_FAILED       = 3
 )
 
 type Torrent struct {
 	// info
-	torrentInfo    *TorrentInfo
-	torrentChannel chan interface{} // to send out messages, alerts etc.
-	clientId       []byte           // self generated client id (20 bytes)
+	tinfo          *TorrentInfo
+	torrentChannel chan *TorrentMessage // to send out messages, alerts etc.
+	clientId       []byte               // self generated client id (20 bytes)
 	clientPort     uint16
 	clientReserved []byte // client reserved bits, 8 bytes
 
 	// trackers
-	trackerMap     map[string]*Tracker // announce -> tracker
-	trackerChannel chan interface{}    // to receive messages from trackers
+	trackerMap     map[string]*Tracker  // announce -> tracker
+	trackerChannel chan *TrackerMessage // to receive messages from trackers
 
 	// peers
-	peerInfoMap   map[uint64]*PeerInfo // peer -> peer
-	activePeerMap map[uint64]*Peer     // peer.key -> peer
-	peerChannel   chan *MessageParams  // to receive messages from peers
+	peerLock      sync.Mutex
+	peerInfoMap   map[string]*PeerInfo //
+	inActivePeers map[string]*PeerInfo // peers which are disabled
+	activePeerMap map[string]*Peer     // peer.key -> peer
+	peerChannel   chan *PeerMessage    // to receive messages from peers
 
 	// pieces
-	pieceManager     *PieceManager
-	pieceMap         map[int]bool // whether piece is scheduled or not
-	pieceReplication map[int]int  // piece index -> replication count
+	pm        *PieceManager
+	pieceLock sync.Mutex
+	pieceMap  map[int]int // set status of piece, pending, scheduled, completed
 }
 
-func NewTorrent(torrentInfo *TorrentInfo) *Torrent {
-
-	fmt.Printf("info hash : %x\n", torrentInfo.InfoHash)
-	fmt.Println("file length : ", torrentInfo.Length)
-	fmt.Println("piece length : ", torrentInfo.PieceLength)
-	fmt.Println("num pieces :", torrentInfo.NumPieces)
-	fmt.Println()
+func NewTorrent(tinfo *TorrentInfo) *Torrent {
 
 	t := &Torrent{
-		torrentInfo:    torrentInfo,
-		torrentChannel: make(chan interface{}),
+		tinfo:          tinfo,
+		torrentChannel: make(chan *TorrentMessage),
 		clientId:       GeneratePeerId(),
-		clientPort:     0,
+		clientPort:     6541,
 		clientReserved: make([]byte, 8),
 
 		trackerMap:     make(map[string]*Tracker, 0),
-		trackerChannel: make(chan interface{}),
+		trackerChannel: make(chan *TrackerMessage),
 
-		peerInfoMap:   make(map[uint64]*PeerInfo),
-		activePeerMap: make(map[uint64]*Peer),
-		peerChannel:   make(chan *MessageParams),
+		peerInfoMap:   make(map[string]*PeerInfo),
+		inActivePeers: make(map[string]*PeerInfo),
+		activePeerMap: make(map[string]*Peer),
+		peerChannel:   make(chan *PeerMessage),
 
-		pieceManager:     NewPieceManager(torrentInfo),
-		pieceMap:         make(map[int]bool),
-		pieceReplication: make(map[int]int),
+		pm:       NewPieceManager(tinfo),
+		pieceMap: make(map[int]int),
 	}
 
 	// extension protocol
-	t.clientReserved[5] |= 0x10 // ltep extension
-	t.clientReserved[7] |= 0x05 // fast peers extension
-	t.clientReserved[8] |= 0x01 // dht
+	// t.clientReserved[5] |= 0x10 // ltep extension
 
 	return t
 }
 
-func (t *Torrent) Start() (chan interface{}, error) {
+func (t *Torrent) Start() chan *TorrentMessage {
 	// start a tcp server to handle peer requests
 
-	go t.start()
-	return t.torrentChannel, nil
+	go t.run()
+	return t.torrentChannel
 }
 
 func (t *Torrent) Stop() {
@@ -91,53 +89,23 @@ func (t *Torrent) Resume() {
 
 }
 
-func (t *Torrent) start() {
+// torrent state manager
+func (t *Torrent) run() {
 
-	go t.pieceManager.start()
-	go t.handlePeerChannel()
-	go t.handleTrackerChannel()
+	// TODO: fetch metadata
 
-	pbytes := []byte{127, 0, 0, 1, 247, 222}
-	ip := net.IP(pbytes[:4])
-	port := binary.BigEndian.Uint16(pbytes[4:6])
-	h := sha1.Sum([]byte(fmt.Sprintf("%s:%d", ip, port)))
-	key := hex.EncodeToString(h[:])
-
-	peerInfo, err := PeerHandshake(ip, port, key,
-		t.torrentInfo.InfoHash, t.clientReserved, t.clientId)
-	if err != nil {
-		panic(err)
-	}
-	// fmt.Println("client reserved ", hex.EncodeToString(t.clientReserved))
-	fmt.Printf("creating new peer : %s -> %s\n",
-		peerInfo.Conn.LocalAddr(), peerInfo.Conn.RemoteAddr())
-	peer := NewPeer(peerInfo, t.torrentInfo, t.pieceManager)
-
-	peer.Start(t.peerChannel)
-
-	for pi := 0; pi < int(t.torrentInfo.NumPieces); pi++ {
-		peer.AddPieceToQ(pi)
+	// bootstrap
+	for i := 0; i < int(t.tinfo.NumPieces); i++ {
+		t.pieceMap[i] = PIECE_PENDING
 	}
 
-	<-time.After(5 * time.Minute)
-	t.torrentChannel <- "done"
-}
+	t.pm.Start()
+	go t.handleTrackers()
+	go t.handlePeers()
 
-// process messages received from trackers
-func (t *Torrent) handleTrackerChannel() {
+	for t.pm.downloadedPieces != int(t.tinfo.NumPieces) {
 
-}
-
-// process messages received from peers
-func (t *Torrent) handlePeerChannel() {
-
-	// handle magnet link
-	if t.torrentInfo.IsFromMagnetLink {
-		fmt.Println("is from magnet link")
-	}
-
-	downloaded := 0
-	for {
+		fmt.Println("waiting for peer message..")
 		msg, ok := <-t.peerChannel
 		if !ok {
 			fmt.Println("piece channel is closed")
@@ -145,60 +113,182 @@ func (t *Torrent) handlePeerChannel() {
 		}
 
 		switch msg.Type {
-		case MESSAGE_PIECE_COMPLETED:
-			v := msg.Data.(*MessagePieceCompleted)
-			pi := v.PieceIndex
-			// verify hash
-			piece := t.pieceManager.pieceMap[int(pi)]
-			phash := t.torrentInfo.PieceHashes[20*pi : 20*(pi+1)]
+
+		case PEER_PIECE_DONE:
+			pi := msg.Data.(int)
+			piece := t.pm.pieceMap[pi]
+			phash := t.tinfo.PieceHashes[20*pi : 20*(pi+1)]
 			chash := sha1.Sum(piece.data[0:piece.length])
 
-			if bytes.Equal(phash, chash[:]) {
-				fmt.Printf("got piece %d, ..verified\n", pi)
-				t.pieceManager.savePiece(int(pi))
-				downloaded++
+			if bytes.Equal(phash, chash[:]) { // verify hash
+				fmt.Printf("got piece %d/%d, ..verified\n", pi, t.tinfo.NumPieces)
+				t.pm.savePiece(pi)
+
 			} else {
 				fmt.Printf("got piece %d, Hash Mismatch : got(%x), wanted(%x)\n",
 					pi, chash, phash)
 			}
 
-		case MESSAGE_PIECE_CANCELLED:
+		case PEER_PIECE_FAILED:
+			pi := msg.Data.(int)
+			t.pieceLock.Lock()
+			t.pieceMap[pi] = PIECE_PENDING
+			t.pieceLock.Unlock()
+		}
+	}
 
-		case MESSAGE_BITFIELD:
+	fmt.Println("all pieces are downloaded, exiting..")
+	t.torrentChannel <- &TorrentMessage{
+		Type: 0,
+		Data: "the end",
+	}
+}
 
-		case MESSAGE_HAVE:
+// schedule pending pieces to peers
+func (t *Torrent) handlePeers() {
+
+	for t.pm.downloadedPieces != int(t.tinfo.NumPieces) {
+
+		// check if there are any peers
+		if len(t.peerInfoMap) == 0 {
+			fmt.Println("no peers found, waiting..")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// find pieces to schedule
+		pendingPieces := make([]int, 0)
+		t.pieceLock.Lock()
+		for k, v := range t.pieceMap {
+			if v == PIECE_PENDING {
+				pendingPieces = append(pendingPieces, k)
+				if len(pendingPieces) > 5 {
+					break
+				}
+			}
+		}
+		t.pieceLock.Unlock()
+
+		if (len(pendingPieces)) == 0 {
+			fmt.Println("no pending pieces to schedule, waiting..")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// initialize new peers
+		initList := make([]*PeerInfo, 0)
+		t.peerLock.Lock()
+		for k, v := range t.peerInfoMap {
+			if _, ok := t.activePeerMap[k]; ok {
+				continue
+			}
+			if _, ok := t.inActivePeers[k]; ok {
+				continue
+			}
+			initList = append(initList, v)
+		}
+		t.peerLock.Unlock()
+
+		for _, pInfo := range initList {
+			peerInfo := pInfo
+			go func() {
+				fmt.Println("initiating peer", peerInfo.Key)
+				err := peerInfo.SendVerifyHandshake(t.tinfo.InfoHash, t.clientReserved, t.clientId)
+				if err != nil {
+					t.inActivePeers[peerInfo.Key] = peerInfo
+					return
+				}
+				fmt.Println(peerInfo.Key, "connected")
+
+				t.peerLock.Lock()
+				peer := NewPeer(peerInfo, t.tinfo, t.pm)
+				peer.Start(t.peerChannel)
+				t.activePeerMap[peerInfo.Key] = peer
+				t.peerLock.Unlock()
+			}()
+		}
+
+		if len(initList) > 0 { // wait for new peers to connect
+			fmt.Printf("initialized %d peers, waiting..\n", len(initList))
+			time.Sleep(3 * time.Second)
+		}
+
+		if len(t.activePeerMap) == 0 {
+			fmt.Printf("no active peers found, waiting..\n")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// schedule pieces to peers (round robin)
+		t.peerLock.Lock()
+		t.pieceLock.Lock()
+
+		fmt.Println("pending Pieces : ", pendingPieces)
+		i := 0
+		for i < len(pendingPieces) {
+			for _, peer := range t.activePeerMap {
+				if i < len(pendingPieces) {
+					pi := pendingPieces[i]
+					peer.AddPieceToQ(pi)
+					t.pieceMap[pi] = PIECE_SCHEDULED
+					fmt.Printf("scheduled %d to peer %s\n", pi, peer.key)
+					i++
+				}
+			}
+		}
+		t.pieceLock.Unlock()
+		t.peerLock.Unlock()
+
+		time.Sleep(5 * time.Second)
+	}
+
+	t.torrentChannel <- &TorrentMessage{
+		Type: 0,
+		Data: "done",
+	}
+}
+
+// process messages received from trackers
+func (t *Torrent) handleTrackers() {
+
+	// initialize trackers
+	announceList := append([]string{t.tinfo.Announce}, t.tinfo.AnnounceList...)
+	for _, announce := range announceList {
+		// skip if the tracker exists
+		if _, ok := t.trackerMap[announce]; ok {
+			continue
+		}
+		tracker := NewTracker(announce, t.clientId, t.clientPort, t.tinfo)
+		tracker.Start(t.trackerChannel)
+		t.trackerMap[announce] = tracker
+	}
+	fmt.Printf("started %d trackers\n", len(announceList))
+
+	for {
+		tm, ok := <-t.trackerChannel
+		if !ok {
+			fmt.Println("trackerChannel is closed")
+			break
+		}
+
+		switch v := tm.Data.(type) {
+		case []*PeerInfo:
+			fmt.Printf("recevied %d peers from %s\n", len(v), tm.Key)
+			t.peerLock.Lock()
+			for _, peerInfo := range v {
+				// add to map if key is missing in peerInfo map
+				if _, ok := t.peerInfoMap[peerInfo.Key]; !ok {
+					t.peerInfoMap[peerInfo.Key] = peerInfo
+				}
+			}
+			t.peerLock.Unlock()
+
+		default:
+			fmt.Printf("unknown tracker msg type : %T", v)
 		}
 	}
 }
 
-// // recv and send handshake, returns (peerId, error)
-// func (t *Torrent) VerifyHandshake(conn net.Conn) ([]byte, error) {
-
-// 	rh, err := t.recvHandShake(conn)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	if rh.Pstr != PROTOCOL {
-// 		return nil, fmt.Errorf("invalid protocol string %s", rh.Pstr)
-// 	}
-
-// 	// TODO : see if we have the file with infoHash
-
-// 	peerId := make([]byte, 20)
-// 	copy(peerId, rh.PeerId)
-// 	sh := &HandShakeParams{
-// 		PStrLen:  uint8(len(PROTOCOL)),
-// 		Pstr:     PROTOCOL,
-// 		Reserved: make([]byte, 8),
-// 		InfoHash: rh.InfoHash,
-// 		PeerId:   t.clientId,
-// 	}
-// 	peerInfo := &PeerInfo{}
-// 	err = peerInfo.SendHandshake(sh)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	return peerId, nil
-// }
+func (t *Torrent) DownloadedPieces() int {
+	return int(t.pm.downloadedPieces)
+}

@@ -72,7 +72,7 @@ func TestPieceManager(t *testing.T) {
 
 	pm := NewPieceManager(tinfo)
 	pm.setDownloadDir(root)
-	pm.start()
+	pm.Start()
 	for _, pi := range pieceIndices {
 		piece := pm.getPiece(pi)
 		begin := pi * int(tinfo.PieceLength)

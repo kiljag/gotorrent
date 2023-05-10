@@ -54,8 +54,7 @@ type HandShakeParams struct {
 type MessageParams struct {
 	Length uint32
 	Type   uint8
-	// all the extractable fields
-	Data interface{}
+	Data   interface{}
 }
 
 type MessageHave struct {
@@ -94,11 +93,89 @@ type MessageExtension struct {
 	Payload []byte
 }
 
-// custom message types
-type MessagePieceCompleted struct {
-	PieceIndex uint32
+type MessageDefault struct {
+	Payload []byte
 }
 
-type MessagePieceCancelled struct {
-	PieceIndex uint32
+type TorrentMessage struct {
+	Type int
+	Data string
+}
+
+type PeerMessage struct {
+	Key  string // peer identifier
+	Type int
+	Data interface{}
+}
+
+type TrackerMessage struct {
+	Key  string // tracker identifier
+	Type int
+	Data interface{} // paylod
+}
+
+// http structs
+type AnnounceReq struct {
+	InfoHash   [20]byte // 20 bytes SHA1 hash
+	PeerId     [20]byte // 20 byte client generated ID
+	Port       uint16   // range 6881-6889
+	Uploaded   int64    // total amount uploaded since 'started' event
+	Downloaded int64    // total amount downloaded since 'started' event
+	Left       int64    // the number of bytes that has to be downloaded
+	Compact    int      // 0 or 1
+	NoPeerId   int      // (Optional) tracker can omit peer id in peers
+	Event      string   // 'started', 'completed', 'stopped'
+	Ip         string   // (Optional)
+	Numwant    int      // (Optional) number of peers client would like to recieve, default is 50
+	Key        string   // (Optional) additional identification
+	TrackerId  string   // (Optional)
+}
+
+type AnnounceRes struct {
+	Interval    int64 // The waiting time between requests
+	MinInterval int64 // (Optional) the minimum announce interval
+	Complete    int64 // number of peers with the entire file
+	Incomplete  int64 // number of non-seeder peers (leechers)
+	TrackerId   string
+	ExternalIP  [4]byte
+	Peers       []*PeerInfo // ipv4
+	PeersV6     []*PeerInfo // ipv6
+}
+
+// udp structs
+type ConnectReqUDP struct {
+	ProtocolID    uint64 // 0x41727101980, magic constant
+	Action        uint32 // 0 for connect
+	TransactionId uint32
+}
+
+type ConnectResUDP struct {
+	Action        uint32 // 0 for connect
+	TransactionId uint32
+	ConnectionId  uint64
+}
+
+type AnnounceReqUDP struct {
+	ConnectionId  uint64
+	Action        uint32 // 1 for announce
+	TransactionId uint32
+	InfoHash      [20]byte
+	PeerId        [20]byte
+	Downloaded    uint64
+	Left          uint64
+	Uploaded      uint64
+	Event         uint32 // 0: none; 1: Completed, 2: started, 3: stopped
+	IpAddr        uint32 // 0 default
+	Key           uint32
+	NumWant       int32 // -1 default
+	Port          uint16
+}
+
+type AnnounceResUDP struct {
+	Action        uint32
+	TransactionId uint32
+	Interval      uint32
+	Leechers      uint32
+	Seeders       uint32
+	Peers         []*PeerInfo
 }

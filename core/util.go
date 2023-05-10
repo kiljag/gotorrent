@@ -7,6 +7,31 @@ import (
 	"net"
 )
 
+func createMsgMap() map[uint8]string {
+	msgIdMap := make(map[uint8]string)
+	msgIdMap[MESSAGE_CHOKE] = "choke"
+	msgIdMap[MESSAGE_UNCHOKE] = "unchoke"
+	msgIdMap[MESSAGE_INTERESTED] = "interested"
+	msgIdMap[MESSAGE_NOT_INTERESTED] = "not+interested"
+	msgIdMap[MESSAGE_HAVE] = "have"
+	msgIdMap[MESSAGE_BITFIELD] = "bitfield"
+	msgIdMap[MESSAGE_REQUEST] = "request"
+	msgIdMap[MESSAGE_PIECE_BLOCK] = "piece+block"
+	msgIdMap[MESSAGE_CANCEL] = "cancel"
+	msgIdMap[MESSAGE_PORT] = "port"
+	msgIdMap[MESSAGE_KEEPALIVE] = "keepalive"
+	msgIdMap[MESSAGE_SUGGEST] = "suggest"
+	msgIdMap[MESSAGE_HAVE_ALL] = "have+all"
+	msgIdMap[MESSAGE_HAVE_NONE] = "have+none"
+	msgIdMap[MESSAGE_REJECT_REQUEST] = "reject+request"
+	msgIdMap[MESSAGE_ALLOWED_FAST] = "allowed+fast"
+	msgIdMap[MESSAGE_LTEP] = "extension+ltep"
+	msgIdMap[MESSAGE_HASH_REQUEST] = "hash+request"
+	msgIdMap[MESSAGE_HASHES] = "hashes"
+	msgIdMap[MESSAGE_HASH_REJECT] = "hash+reject"
+	return msgIdMap
+}
+
 func GeneratePeerId() []byte {
 	id := make([]byte, 20)
 	copy(id[:8], []byte("-GT0101-"))

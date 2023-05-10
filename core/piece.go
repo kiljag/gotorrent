@@ -12,6 +12,10 @@ import (
 const (
 	PIECE_BLOCK_LENGTH   = 16 * 1024 // 16KB
 	TORRENT_DOWNLOAD_DIR = "~/Downloads/"
+
+	PIECE_PENDING   = 0
+	PIECE_SCHEDULED = 1
+	PIECE_COMPLETED = 2
 )
 
 // piece structure
@@ -71,7 +75,7 @@ func (pm *PieceManager) setDownloadDir(downloadDir string) {
 	pm.downloadDir = downloadDir
 }
 
-func (pm *PieceManager) start() {
+func (pm *PieceManager) Start() {
 	go pm.handleDownloadedPieces()
 }
 
